@@ -1,5 +1,17 @@
 # 更新日志
 
+## v1.2.2
+修复 v1.2.1 造成的「点不开面板」：
+- v1.2.1 把拖曳的 pointermove/pointerup 移到 document 上，但悬浮球仍然在 pointerdown
+  时呼叫 `setPointerCapture`。指针捕获会改变事件的派送路径，导致挂在 document 上的
+  `pointerup` 收不到事件，连带把点击一起吃掉 —— 结果球既拖不动也点不开。
+- 改成**拖曳与点击彻底分开**：开关面板走原生 `click`（最可靠），pointer 事件只负责拖曳，
+  真的拖动过才设 `suppressClick` 让紧接着的那次 click 不误触发。完全不再使用指针捕获。
+- **修掉 pagehide 隐患**：手机切分页或切到别的 App 时浏览器也会发 `pagehide`
+  （进 bfcache，之后还会回来），v1.1.1 以来这会把整个 UI 拆掉，而且 `destroyed`
+  旗标是永久的、回来后再也不会重建。现在会检查 `event.persisted`，
+  bfcache 那种情况不拆 UI，只有真正卸载/停用脚本才清理。
+
 ## v1.2.1
 拖曳修复：
 - **触屏拖不动**：悬浮球和面板标题栏加上 `touch-action: none`。

@@ -62,7 +62,7 @@
     console.warn('[世界模拟器] 这些酒馆助手接口没找到，相关功能会失效：', _missing);
   }
 
-  const SCRIPT_VERSION = "1.2.1";
+  const SCRIPT_VERSION = "1.2.2";
 
   // SillyTavern 的 extension_prompt 常量并没有挂在 getContext() 上，
   // 这里直接用 public/script.js 里的数值（IN_CHAT=1 / SYSTEM=0），
@@ -1075,9 +1075,14 @@
       </div>
     `).appendTo('body');
 
-    // --- 悬浮球拖拽（用 Pointer Events，鼠标和触屏都能拖）---
-    // 拖动超过 5px 才算拖曳，否则视为点击 → 开关面板
-    let dragging = false, moved = false, offsetX = 0, offsetY = 0, downX = 0, downY = 0;
+    // --- 悬浮球：拖曳与点击分开处理 ---
+    // 开关面板一律走原生 click（最可靠）；pointer 事件只负责拖曳。
+    // 真的拖动过就设 suppressClick，让紧接着那次 click 不要误开面板。
+    // 注意：这里绝对不要用 setPointerCapture —— 捕获会改变事件派送路径，
+    // 让挂在 document 上的监听收不到 pointerup，连点击都会一起失效。
+    let dragging = false, moved = false, suppressClick = false;
+    let offsetX = 0, offsetY = 0, downX = 0, downY = 0;
+
     $ball.on('pointerdown', e => {
       const ev = e.originalEvent || e;
       dragging = true; moved = false;
@@ -1085,32 +1090,33 @@
       const r = $ball[0].getBoundingClientRect();
       offsetX = ev.clientX - r.left;
       offsetY = ev.clientY - r.top;
-      try { $ball[0].setPointerCapture(ev.pointerId); } catch (err) { /* noop */ }
-      e.preventDefault();
     });
     $(document).on('pointermove.wsp', e => {
       if (!dragging) return;
       const ev = e.originalEvent || e;
-      if (Math.abs(ev.clientX - downX) > 5 || Math.abs(ev.clientY - downY) > 5) moved = true;
+      if (!moved && (Math.abs(ev.clientX - downX) > 5 || Math.abs(ev.clientY - downY) > 5)) {
+        moved = true;
+      }
       if (!moved) return;
       const x = Math.max(0, Math.min(window.innerWidth - 52, ev.clientX - offsetX));
       const y = Math.max(0, Math.min(window.innerHeight - 52, ev.clientY - offsetY));
       $ball.css({ left: x + 'px', top: y + 'px' });
       e.preventDefault();
     });
-    $(document).on('pointerup.wsp pointercancel.wsp', e => {
+    $(document).on('pointerup.wsp pointercancel.wsp', () => {
       if (!dragging) return;
       dragging = false;
-      const ev = e.originalEvent || e;
-      try { $ball[0].releasePointerCapture(ev.pointerId); } catch (err) { /* noop */ }
       if (moved) {
+        suppressClick = true;
         const r = $ball[0].getBoundingClientRect();
         settings.ballX = r.left;
         settings.ballY = r.top;
         saveSettings();
-      } else {
-        togglePanel();
       }
+    });
+    $ball.on('click', () => {
+      if (suppressClick) { suppressClick = false; return; }
+      togglePanel();
     });
 
     // --- 面板拖拽 ---
@@ -1181,8 +1187,14 @@
     registerFloorTrigger();
     if (settings.running) startMinuteTimer();
     updateInjection(cachedState);
-    // 脚本被停用/页面卸载时自我清理，不留悬浮球在画面上
-    $(window).on('pagehide.worldsim', destroy);
+    // 脚本被停用/页面卸载时自我清理，不留悬浮球在画面上。
+    // 但手机切分页/切到别的 App 时浏览器也会发 pagehide（进 bfcache，之后还会回来），
+    // 那种情况 persisted 会是 true，这时候不能拆 UI，否则回来就整个不见了。
+    $(window).on('pagehide.worldsim', e => {
+      const ev = e.originalEvent || e;
+      if (ev && ev.persisted) return;
+      destroy();
+    });
     log(`世界模拟器 v${SCRIPT_VERSION} 已加载`);
   }
 
