@@ -62,7 +62,23 @@
     console.warn('[世界模拟器] 这些酒馆助手接口没找到，相关功能会失效：', _missing);
   }
 
-  const SCRIPT_VERSION = "1.1.1";
+  const SCRIPT_VERSION = "1.2.0";
+
+  // SillyTavern 的 extension_prompt 常量并没有挂在 getContext() 上，
+  // 这里直接用 public/script.js 里的数值（IN_CHAT=1 / SYSTEM=0），
+  // 若将来 context 有导出就优先用导出的。
+  const PROMPT_TYPE_IN_CHAT = 1;
+  const PROMPT_ROLE_SYSTEM = 0;
+  function promptTypeInChat(ctx) {
+    return (ctx && ctx.extension_prompt_types && ctx.extension_prompt_types.IN_CHAT)
+      ?? (ctx && ctx.extensionPromptTypes && ctx.extensionPromptTypes.IN_CHAT)
+      ?? PROMPT_TYPE_IN_CHAT;
+  }
+  function promptRoleSystem(ctx) {
+    return (ctx && ctx.extension_prompt_roles && ctx.extension_prompt_roles.SYSTEM)
+      ?? (ctx && ctx.extensionPromptRoles && ctx.extensionPromptRoles.SYSTEM)
+      ?? PROMPT_ROLE_SYSTEM;
+  }
   const INJECT_KEY = 'world_sim_current';
   const INJECT_TAG = 'World_Current';
   const MAX_EVENTS = 12;
@@ -200,19 +216,16 @@
   function updateInjection(state) {
     try {
       const ctx = SillyTavern.getContext();
-      if (!settings.injectState) {
-        ctx.setExtensionPrompt(INJECT_KEY, '', ctx.extension_prompt_types.IN_CHAT, settings.injectDepth, false, ctx.extension_prompt_roles.SYSTEM);
-        return;
-      }
-      const text = formatWorldStateForInjection(state);
-      const block = `<${INJECT_TAG}>\n${text}\n</${INJECT_TAG}>`;
+      const body = settings.injectState
+        ? `<${INJECT_TAG}>\n${formatWorldStateForInjection(state)}\n</${INJECT_TAG}>`
+        : '';
       ctx.setExtensionPrompt(
         INJECT_KEY,
-        block,
-        ctx.extension_prompt_types.IN_CHAT,
+        body,
+        promptTypeInChat(ctx),
         settings.injectDepth,
         false,
-        ctx.extension_prompt_roles.SYSTEM
+        promptRoleSystem(ctx)
       );
     } catch (e) {
       log('注入世界状态失败：' + e.message);
@@ -617,7 +630,9 @@
       @keyframes wsp-spin { to { transform: rotate(360deg); } }
 
       #wsp-panel {
-        position: fixed; z-index: 10000; width: 560px; height: 460px;
+        position: fixed; z-index: 10000;
+        width: min(560px, calc(100vw - 16px));
+        height: min(460px, calc(100vh - 32px));
         background: #1b1b1f; color: #e8e8ea; border-radius: 10px;
         box-shadow: 0 8px 30px rgba(0,0,0,.55); font-size: 13px;
         font-family: system-ui, sans-serif; display: none; overflow: hidden;
@@ -635,10 +650,18 @@
       #wsp-tabs {
         width: 120px; flex: none; background: #202127; border-right: 1px solid #33343a;
         padding: 8px 0; display: flex; flex-direction: column; gap: 2px;
+        overflow-y: auto;
       }
       .wsp-tab {
         padding: 9px 12px; cursor: pointer; border-left: 3px solid transparent;
         color: #a8a9b4; white-space: nowrap;
+      }
+      /* 窄屏（手机）：左边分页栏缩成图标条，主页占满剩下的宽度 */
+      @media (max-width: 420px) {
+        #wsp-tabs { width: 44px; }
+        .wsp-tab { padding: 10px 0; text-align: center; font-size: 17px; }
+        .wsp-tab .wsp-tab-text { display: none; }
+        #wsp-content { padding: 8px; }
       }
       .wsp-tab:hover { background: #282a31; color: #ddd; }
       .wsp-tab.active { background: #2b2d36; color: #fff; border-left-color: #5b7fc7; }
@@ -901,11 +924,11 @@
   }
 
   const TABS = [
-    { id: 'npc', label: '🧑 NPC 状态', render: renderNpcTab },
-    { id: 'relations', label: '💞 关系网', render: renderRelationsTab },
-    { id: 'world', label: '🌍 世界大小事', render: renderWorldTab },
-    { id: 'settings', label: '⚙️ 设置', render: renderSettingsTab },
-    { id: 'advanced', label: '🛠 高级/日志', render: renderAdvancedTab },
+    { id: 'npc', icon: '🧑', text: 'NPC 状态', render: renderNpcTab },
+    { id: 'relations', icon: '💞', text: '关系网', render: renderRelationsTab },
+    { id: 'world', icon: '🌍', text: '世界大小事', render: renderWorldTab },
+    { id: 'settings', icon: '⚙️', text: '设置', render: renderSettingsTab },
+    { id: 'advanced', icon: '🛠', text: '高级/日志', render: renderAdvancedTab },
   ];
 
   function renderActiveTab() {
@@ -1023,8 +1046,13 @@
     $('#wsp-ball, #wsp-panel').remove();
     injectStyle();
 
-    const startX = settings.ballX != null ? settings.ballX : (window.innerWidth - 80);
-    const startY = settings.ballY != null ? settings.ballY : 120;
+    // 夹回可视范围，避免换装置/改视窗大小后球停在画面外看不到
+    const maxX = Math.max(0, window.innerWidth - 56);
+    const maxY = Math.max(0, window.innerHeight - 56);
+    const rawX = settings.ballX != null ? settings.ballX : (window.innerWidth - 68);
+    const rawY = settings.ballY != null ? settings.ballY : 120;
+    const startX = Math.max(0, Math.min(maxX, rawX));
+    const startY = Math.max(0, Math.min(maxY, rawY));
 
     const $ball = $(`<div id="wsp-ball" title="世界模拟器 v${SCRIPT_VERSION}">🌍</div>`)
       .css({ left: startX + 'px', top: startY + 'px' })
@@ -1038,32 +1066,41 @@
         </div>
         <div id="wsp-main">
           <div id="wsp-tabs">
-            ${TABS.map(t => `<div class="wsp-tab" data-tab="${t.id}">${t.label}</div>`).join('')}
+            ${TABS.map(t => `<div class="wsp-tab" data-tab="${t.id}" title="${t.text}">${t.icon}<span class="wsp-tab-text"> ${t.text}</span></div>`).join('')}
           </div>
           <div id="wsp-content"></div>
         </div>
       </div>
     `).appendTo('body');
 
-    // --- 悬浮球拖拽（拖动不触发开关，只有真正的点击才开）---
-    let dragging = false, moved = false, offsetX = 0, offsetY = 0;
-    $ball.on('mousedown', e => {
+    // --- 悬浮球拖拽（用 Pointer Events，鼠标和触屏都能拖）---
+    // 拖动超过 5px 才算拖曳，否则视为点击 → 开关面板
+    let dragging = false, moved = false, offsetX = 0, offsetY = 0, downX = 0, downY = 0;
+    $ball.on('pointerdown', e => {
+      const ev = e.originalEvent || e;
       dragging = true; moved = false;
+      downX = ev.clientX; downY = ev.clientY;
       const r = $ball[0].getBoundingClientRect();
-      offsetX = e.clientX - r.left;
-      offsetY = e.clientY - r.top;
+      offsetX = ev.clientX - r.left;
+      offsetY = ev.clientY - r.top;
+      try { $ball[0].setPointerCapture(ev.pointerId); } catch (err) { /* noop */ }
       e.preventDefault();
     });
-    $(document).on('mousemove.wsp', e => {
+    $ball.on('pointermove', e => {
       if (!dragging) return;
-      moved = true;
-      const x = Math.max(0, Math.min(window.innerWidth - 52, e.clientX - offsetX));
-      const y = Math.max(0, Math.min(window.innerHeight - 52, e.clientY - offsetY));
+      const ev = e.originalEvent || e;
+      if (Math.abs(ev.clientX - downX) > 5 || Math.abs(ev.clientY - downY) > 5) moved = true;
+      if (!moved) return;
+      const x = Math.max(0, Math.min(window.innerWidth - 52, ev.clientX - offsetX));
+      const y = Math.max(0, Math.min(window.innerHeight - 52, ev.clientY - offsetY));
       $ball.css({ left: x + 'px', top: y + 'px' });
+      e.preventDefault();
     });
-    $(document).on('mouseup.wsp', () => {
+    $ball.on('pointerup pointercancel', e => {
       if (!dragging) return;
       dragging = false;
+      const ev = e.originalEvent || e;
+      try { $ball[0].releasePointerCapture(ev.pointerId); } catch (err) { /* noop */ }
       if (moved) {
         const r = $ball[0].getBoundingClientRect();
         settings.ballX = r.left;
@@ -1076,19 +1113,29 @@
 
     // --- 面板拖拽 ---
     let pDrag = false, pOffX = 0, pOffY = 0;
-    $('#wsp-titlebar').on('mousedown', e => {
+    $('#wsp-titlebar').on('pointerdown', e => {
       if ($(e.target).hasClass('wsp-close')) return;
+      const ev = e.originalEvent || e;
       pDrag = true;
       const r = $panel[0].getBoundingClientRect();
-      pOffX = e.clientX - r.left;
-      pOffY = e.clientY - r.top;
+      pOffX = ev.clientX - r.left;
+      pOffY = ev.clientY - r.top;
+      try { e.currentTarget.setPointerCapture(ev.pointerId); } catch (err) { /* noop */ }
       e.preventDefault();
     });
-    $(document).on('mousemove.wsppanel', e => {
+    $('#wsp-titlebar').on('pointermove', e => {
       if (!pDrag) return;
-      $panel.css({ left: (e.clientX - pOffX) + 'px', top: (e.clientY - pOffY) + 'px' });
+      const ev = e.originalEvent || e;
+      const w = $panel.outerWidth(), h = $panel.outerHeight();
+      const x = Math.max(0, Math.min(window.innerWidth - w, ev.clientX - pOffX));
+      const y = Math.max(0, Math.min(window.innerHeight - h, ev.clientY - pOffY));
+      $panel.css({ left: x + 'px', top: y + 'px' });
     });
-    $(document).on('mouseup.wsppanel', () => { pDrag = false; });
+    $('#wsp-titlebar').on('pointerup pointercancel', e => {
+      pDrag = false;
+      const ev = e.originalEvent || e;
+      try { e.currentTarget.releasePointerCapture(ev.pointerId); } catch (err) { /* noop */ }
+    });
 
     $('.wsp-close').on('click', () => $panel.removeClass('wsp-open'));
     $('.wsp-tab').on('click', function () {
@@ -1105,14 +1152,21 @@
       $panel.removeClass('wsp-open');
       return;
     }
-    // 开启时定位到球旁边，并避免超出画面
+    // 先显示再量尺寸（面板宽高是响应式的，隐藏时量不到）
+    $panel.addClass('wsp-open');
+    const pw = $panel.outerWidth();
+    const ph = $panel.outerHeight();
     const r = $('#wsp-ball')[0].getBoundingClientRect();
-    let left = r.left - 570;
-    if (left < 10) left = r.right + 10;
-    if (left + 560 > window.innerWidth) left = Math.max(10, window.innerWidth - 570);
-    let top = Math.min(r.top, window.innerHeight - 470);
-    if (top < 10) top = 10;
-    $panel.css({ left: left + 'px', top: top + 'px' }).addClass('wsp-open');
+
+    // 优先放在球的左边，放不下就放右边，再放不下就居中
+    let left = r.left - pw - 10;
+    if (left < 6) left = r.right + 10;
+    if (left + pw > window.innerWidth - 6) left = Math.max(6, (window.innerWidth - pw) / 2);
+
+    let top = Math.min(r.top, window.innerHeight - ph - 6);
+    if (top < 6) top = 6;
+
+    $panel.css({ left: Math.round(left) + 'px', top: Math.round(top) + 'px' });
     loadWorldState().then(renderActiveTab);
   }
 
@@ -1142,7 +1196,7 @@
     // 清掉注入，避免脚本关了世界状态还留在RP提示词里
     try {
       const ctx = SillyTavern.getContext();
-      ctx.setExtensionPrompt(INJECT_KEY, '', ctx.extension_prompt_types.IN_CHAT, settings.injectDepth, false, ctx.extension_prompt_roles.SYSTEM);
+      ctx.setExtensionPrompt(INJECT_KEY, '', promptTypeInChat(ctx), settings.injectDepth, false, promptRoleSystem(ctx));
     } catch (e) { /* noop */ }
 
     $(window).off('pagehide.worldsim');
