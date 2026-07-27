@@ -1,5 +1,14 @@
 # 更新日志
 
+## v1.2.1
+拖曳修复：
+- **触屏拖不动**：悬浮球和面板标题栏加上 `touch-action: none`。
+  没有这行时浏览器会把拖曳手势判定成卷动，直接发 `pointercancel` 取消掉。
+- **面板拖不动**：边界计算有 bug——面板宽度是 `100vw-16px`，在窄屏上几乎等于画面宽，
+  `Math.max(0, Math.min(innerWidth - w, x))` 算出来的可移动范围只剩 16px，等于锁死。
+  改成面板比画面宽时允许拖到负座标。
+- 拖曳的 move/up 监听改挂到 document 上，手指或鼠标移出元件外也不会断。
+
 ## v1.2.0
 修好注入 + 手机/窄屏支持：
 - **修复世界状态注入失败**（`Cannot read properties of undefined (reading 'IN_CHAT')`）：

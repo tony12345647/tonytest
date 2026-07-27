@@ -62,7 +62,7 @@
     console.warn('[世界模拟器] 这些酒馆助手接口没找到，相关功能会失效：', _missing);
   }
 
-  const SCRIPT_VERSION = "1.2.0";
+  const SCRIPT_VERSION = "1.2.1";
 
   // SillyTavern 的 extension_prompt 常量并没有挂在 getContext() 上，
   // 这里直接用 public/script.js 里的数值（IN_CHAT=1 / SYSTEM=0），
@@ -624,6 +624,7 @@
         color: #fff; display: flex; align-items: center; justify-content: center;
         font-size: 24px; cursor: grab; user-select: none;
         box-shadow: 0 4px 14px rgba(0,0,0,.45); transition: transform .15s;
+        touch-action: none;   /* 不加这行，触屏会把拖曳判定成卷动而取消手势 */
       }
       #wsp-ball:hover { transform: scale(1.08); }
       #wsp-ball.wsp-busy { animation: wsp-spin 1.4s linear infinite; }
@@ -643,6 +644,7 @@
         height: 34px; flex: none; display: flex; align-items: center; justify-content: space-between;
         padding: 0 10px; background: #232429; cursor: move; font-weight: 600;
         border-bottom: 1px solid #33343a;
+        touch-action: none; user-select: none;
       }
       #wsp-titlebar .wsp-close { cursor: pointer; opacity: .7; font-size: 16px; }
       #wsp-titlebar .wsp-close:hover { opacity: 1; }
@@ -1086,7 +1088,7 @@
       try { $ball[0].setPointerCapture(ev.pointerId); } catch (err) { /* noop */ }
       e.preventDefault();
     });
-    $ball.on('pointermove', e => {
+    $(document).on('pointermove.wsp', e => {
       if (!dragging) return;
       const ev = e.originalEvent || e;
       if (Math.abs(ev.clientX - downX) > 5 || Math.abs(ev.clientY - downY) > 5) moved = true;
@@ -1096,7 +1098,7 @@
       $ball.css({ left: x + 'px', top: y + 'px' });
       e.preventDefault();
     });
-    $ball.on('pointerup pointercancel', e => {
+    $(document).on('pointerup.wsp pointercancel.wsp', e => {
       if (!dragging) return;
       dragging = false;
       const ev = e.originalEvent || e;
@@ -1120,22 +1122,23 @@
       const r = $panel[0].getBoundingClientRect();
       pOffX = ev.clientX - r.left;
       pOffY = ev.clientY - r.top;
-      try { e.currentTarget.setPointerCapture(ev.pointerId); } catch (err) { /* noop */ }
       e.preventDefault();
     });
-    $('#wsp-titlebar').on('pointermove', e => {
+    $(document).on('pointermove.wsppanel', e => {
       if (!pDrag) return;
       const ev = e.originalEvent || e;
       const w = $panel.outerWidth(), h = $panel.outerHeight();
-      const x = Math.max(0, Math.min(window.innerWidth - w, ev.clientX - pOffX));
-      const y = Math.max(0, Math.min(window.innerHeight - h, ev.clientY - pOffY));
+      // 面板可能比画面还宽（窄屏），此时允许拖到负座标，
+      // 否则可移动范围会被夹成 0 而完全拖不动
+      const minX = Math.min(0, window.innerWidth - w);
+      const maxX = Math.max(0, window.innerWidth - w);
+      const minY = Math.min(0, window.innerHeight - h);
+      const maxY = Math.max(0, window.innerHeight - h);
+      const x = Math.max(minX, Math.min(maxX, ev.clientX - pOffX));
+      const y = Math.max(minY, Math.min(maxY, ev.clientY - pOffY));
       $panel.css({ left: x + 'px', top: y + 'px' });
     });
-    $('#wsp-titlebar').on('pointerup pointercancel', e => {
-      pDrag = false;
-      const ev = e.originalEvent || e;
-      try { e.currentTarget.releasePointerCapture(ev.pointerId); } catch (err) { /* noop */ }
-    });
+    $(document).on('pointerup.wsppanel pointercancel.wsppanel', () => { pDrag = false; });
 
     $('.wsp-close').on('click', () => $panel.removeClass('wsp-open'));
     $('.wsp-tab').on('click', function () {

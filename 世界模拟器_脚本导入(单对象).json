@@ -2,9 +2,9 @@
   "type": "script",
   "enabled": true,
   "name": "世界模拟器",
-  "id": "61707031-71cc-4304-adc3-71483d1d9d15",
-  "content": "// 世界模拟器 - 加载器\n// 这是唯一需要贴进 酒馆助手 → 脚本库 的内容。\n// 升级新版本时：只改最下面那一行的 tag 版本号（例如 @v1.2.0 → @v1.2.0），存档即可，\n// 不用重新贴整段代码。\n//\n// 如果 cdn.jsdelivr.net 连不上/很慢（常见于部分地区网路环境），\n// 把下面这行注释掉，改用底下任一条镜像线路：\n//   import('https://fastly.jsdelivr.net/gh/tony12345647/tonytest@v1.2.0/world-sim.js');\n//   import('https://gcore.jsdelivr.net/gh/tony12345647/tonytest@v1.2.0/world-sim.js');\n//   import('https://testingcf.jsdelivr.net/gh/tony12345647/tonytest@v1.2.0/world-sim.js');\n\nimport('https://cdn.jsdelivr.net/gh/tony12345647/tonytest@v1.2.0/world-sim.js');\n",
-  "info": "悬浮球+分页面板的背景世界模拟。loader 会从 github.com/tony12345647/tonytest 动态加载本体。v1.2.0",
+  "id": "9493397d-c132-4854-89fb-5ce0f0e1858e",
+  "content": "// 世界模拟器 - 加载器\n// 这是唯一需要贴进 酒馆助手 → 脚本库 的内容。\n// 升级新版本时：只改最下面那一行网址里 @ 后面的 tag 版本号，存档即可，\n// 不用重新贴整段代码。最新版本号见仓库的 CHANGELOG.md。\n//\n// 如果 cdn.jsdelivr.net 连不上/很慢（常见于部分地区网路环境），\n// 把下面这行注释掉，改用底下任一条镜像线路：\n//   import('https://fastly.jsdelivr.net/gh/tony12345647/tonytest@v1.2.1/world-sim.js');\n//   import('https://gcore.jsdelivr.net/gh/tony12345647/tonytest@v1.2.1/world-sim.js');\n//   import('https://testingcf.jsdelivr.net/gh/tony12345647/tonytest@v1.2.1/world-sim.js');\n\nimport('https://cdn.jsdelivr.net/gh/tony12345647/tonytest@v1.2.1/world-sim.js');\n",
+  "info": "悬浮球+分页面板的背景世界模拟。loader 会从 github.com/tony12345647/tonytest 动态加载本体。v1.2.1",
   "button": {
     "enabled": true,
     "buttons": [
