@@ -62,7 +62,7 @@
     console.warn('[世界模拟器] 这些酒馆助手接口没找到，相关功能会失效：', _missing);
   }
 
-  const SCRIPT_VERSION = "1.2.2";
+  const SCRIPT_VERSION = "1.3.0";
 
   // SillyTavern 的 extension_prompt 常量并没有挂在 getContext() 上，
   // 这里直接用 public/script.js 里的数值（IN_CHAT=1 / SYSTEM=0），
@@ -743,10 +743,10 @@
         <label>
           <select id="wsp-apiMode">
             <option value="shared"${s.apiMode === 'shared' ? ' selected' : ''}>沿用 ST 当前连线</option>
-            <option value="custom"${s.apiMode === 'custom' ? ' selected' : ''}>自定义反代</option>
+            <option value="custom"${s.apiMode === 'custom' ? ' selected' : ''}>自定义反代（用下面这三格）</option>
           </select>
         </label>
-        <div id="wsp-custom-fields" style="display:${s.apiMode === 'custom' ? 'block' : 'none'};">
+        <div id="wsp-custom-fields">
           <label>Base URL
             <input type="text" id="wsp-url" value="${esc(s.customUrl)}" placeholder="https://gcli.ggchan.dev/v1">
           </label>
@@ -756,6 +756,10 @@
           <label>Model
             <input type="text" id="wsp-model" value="${esc(s.customModel)}" placeholder="gemini-3.1-pro-preview">
           </label>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+            <button id="wsp-use-custom" style="flex:none;">套用这组反代</button>
+            <span id="wsp-api-hint" style="font-size:11px;color:#8f909b;"></span>
+          </div>
         </div>
       </div>
 
@@ -951,14 +955,31 @@
       $('#wsp-toggle').text(settings.running ? '⏸ 停止' : '▶ 开始');
     });
     $('#wsp-run-now').on('click', () => runWorldTick(true));
+    function refreshApiHint() {
+      $('#wsp-api-hint').text(
+        settings.apiMode === 'custom' ? '目前使用：自定义反代' : '目前使用：ST 当前连线'
+      );
+    }
+    refreshApiHint();
     $('#wsp-apiMode').on('change', function () {
       settings.apiMode = this.value;
-      $('#wsp-custom-fields').toggle(this.value === 'custom');
       saveSettings();
+      refreshApiHint();
     });
-    $('#wsp-url').on('change', function () { settings.customUrl = this.value; saveSettings(); });
-    $('#wsp-key').on('change', function () { settings.customKey = this.value; saveSettings(); });
-    $('#wsp-model').on('change', function () { settings.customModel = this.value; saveSettings(); });
+    // 用 input 而不是 change：手机上有时不会触发 change，输入完切走就丢了
+    $('#wsp-url').on('input change', function () { settings.customUrl = this.value; saveSettings(); });
+    $('#wsp-key').on('input change', function () { settings.customKey = this.value; saveSettings(); });
+    $('#wsp-model').on('input change', function () { settings.customModel = this.value; saveSettings(); });
+    $('#wsp-use-custom').on('click', async () => {
+      settings.customUrl = String($('#wsp-url').val() || '').trim();
+      settings.customKey = String($('#wsp-key').val() || '');
+      settings.customModel = String($('#wsp-model').val() || '').trim();
+      settings.apiMode = 'custom';
+      $('#wsp-apiMode').val('custom');
+      await saveSettings();
+      refreshApiHint();
+      log(`已套用自定义反代：${settings.customModel || '(未填 model)'} @ ${settings.customUrl || '(未填 URL)'}`);
+    });
     $('#wsp-mode').on('change', function () {
       settings.triggerMode = this.value; saveSettings(); startMinuteTimer();
     });
@@ -1043,6 +1064,68 @@
     }
   }
 
+  // ---------- 通用拖曳 ----------
+  // 不同环境下能用的事件不一样（有的吃 pointer、有的只吃 touch、桌面吃 mouse），
+  // 这里三种都挂上，用 PointerEvent 支援与否决定走哪条路，避免重复触发。
+  // 绝对不要用 setPointerCapture：它会改变事件派送路径，让 document 上的监听收不到。
+  function makeDraggable($el, ns, onMove, onEnd) {
+    let active = false, moved = false;
+    let downX = 0, downY = 0, offX = 0, offY = 0;
+
+    function start(x, y) {
+      const r = $el[0].getBoundingClientRect();
+      active = true; moved = false;
+      downX = x; downY = y;
+      offX = x - r.left; offY = y - r.top;
+    }
+    function move(x, y) {
+      if (!active) return false;
+      if (!moved && Math.abs(x - downX) <= 5 && Math.abs(y - downY) <= 5) return false;
+      moved = true;
+      onMove(x - offX, y - offY);
+      return true;
+    }
+    function end() {
+      if (!active) return;
+      active = false;
+      if (moved && onEnd) onEnd();
+    }
+
+    if (window.PointerEvent) {
+      $el.on('pointerdown.' + ns, e => {
+        const ev = e.originalEvent || e;
+        if (ev.button != null && ev.button !== 0) return;   // 只认左键/主指针
+        start(ev.clientX, ev.clientY);
+      });
+      $(document).on('pointermove.' + ns, e => {
+        const ev = e.originalEvent || e;
+        if (move(ev.clientX, ev.clientY)) e.preventDefault();
+      });
+      $(document).on('pointerup.' + ns + ' pointercancel.' + ns, end);
+    } else {
+      $el.on('touchstart.' + ns, e => {
+        const t = (e.originalEvent || e).touches[0];
+        if (t) start(t.clientX, t.clientY);
+      });
+      $(document).on('touchmove.' + ns, e => {
+        const t = (e.originalEvent || e).touches[0];
+        if (t && move(t.clientX, t.clientY)) e.preventDefault();
+      });
+      $(document).on('touchend.' + ns + ' touchcancel.' + ns, end);
+
+      $el.on('mousedown.' + ns, e => {
+        if (e.button !== 0) return;
+        start(e.clientX, e.clientY);
+      });
+      $(document).on('mousemove.' + ns, e => {
+        if (move(e.clientX, e.clientY)) e.preventDefault();
+      });
+      $(document).on('mouseup.' + ns, end);
+    }
+
+    return { didMove: () => moved };
+  }
+
   // ---------- 建立悬浮球 + 面板 ----------
   function buildUI() {
     $('#wsp-ball, #wsp-panel').remove();
@@ -1075,64 +1158,32 @@
       </div>
     `).appendTo('body');
 
-    // --- 悬浮球：拖曳与点击分开处理 ---
-    // 开关面板一律走原生 click（最可靠）；pointer 事件只负责拖曳。
-    // 真的拖动过就设 suppressClick，让紧接着那次 click 不要误开面板。
-    // 注意：这里绝对不要用 setPointerCapture —— 捕获会改变事件派送路径，
-    // 让挂在 document 上的监听收不到 pointerup，连点击都会一起失效。
-    let dragging = false, moved = false, suppressClick = false;
-    let offsetX = 0, offsetY = 0, downX = 0, downY = 0;
-
-    $ball.on('pointerdown', e => {
-      const ev = e.originalEvent || e;
-      dragging = true; moved = false;
-      downX = ev.clientX; downY = ev.clientY;
-      const r = $ball[0].getBoundingClientRect();
-      offsetX = ev.clientX - r.left;
-      offsetY = ev.clientY - r.top;
-    });
-    $(document).on('pointermove.wsp', e => {
-      if (!dragging) return;
-      const ev = e.originalEvent || e;
-      if (!moved && (Math.abs(ev.clientX - downX) > 5 || Math.abs(ev.clientY - downY) > 5)) {
-        moved = true;
-      }
-      if (!moved) return;
-      const x = Math.max(0, Math.min(window.innerWidth - 52, ev.clientX - offsetX));
-      const y = Math.max(0, Math.min(window.innerHeight - 52, ev.clientY - offsetY));
-      $ball.css({ left: x + 'px', top: y + 'px' });
-      e.preventDefault();
-    });
-    $(document).on('pointerup.wsp pointercancel.wsp', () => {
-      if (!dragging) return;
-      dragging = false;
-      if (moved) {
+    // --- 悬浮球：拖曳与点击分开 ---
+    // 开关面板一律走原生 click（最可靠，不受 pointer 事件影响）；
+    // 拖曳只负责移动，真的拖过才设 suppressClick 让紧接着那次 click 不误触发。
+    let suppressClick = false;
+    makeDraggable($ball, 'wsp',
+      (x, y) => {
+        $ball.css({
+          left: Math.max(0, Math.min(window.innerWidth - 52, x)) + 'px',
+          top: Math.max(0, Math.min(window.innerHeight - 52, y)) + 'px',
+        });
+      },
+      () => {
         suppressClick = true;
         const r = $ball[0].getBoundingClientRect();
         settings.ballX = r.left;
         settings.ballY = r.top;
         saveSettings();
       }
-    });
+    );
     $ball.on('click', () => {
       if (suppressClick) { suppressClick = false; return; }
       togglePanel();
     });
 
-    // --- 面板拖拽 ---
-    let pDrag = false, pOffX = 0, pOffY = 0;
-    $('#wsp-titlebar').on('pointerdown', e => {
-      if ($(e.target).hasClass('wsp-close')) return;
-      const ev = e.originalEvent || e;
-      pDrag = true;
-      const r = $panel[0].getBoundingClientRect();
-      pOffX = ev.clientX - r.left;
-      pOffY = ev.clientY - r.top;
-      e.preventDefault();
-    });
-    $(document).on('pointermove.wsppanel', e => {
-      if (!pDrag) return;
-      const ev = e.originalEvent || e;
+    // --- 面板拖曳（抓标题栏）---
+    makeDraggable($('#wsp-titlebar'), 'wsppanel', (x, y) => {
       const w = $panel.outerWidth(), h = $panel.outerHeight();
       // 面板可能比画面还宽（窄屏），此时允许拖到负座标，
       // 否则可移动范围会被夹成 0 而完全拖不动
@@ -1140,11 +1191,11 @@
       const maxX = Math.max(0, window.innerWidth - w);
       const minY = Math.min(0, window.innerHeight - h);
       const maxY = Math.max(0, window.innerHeight - h);
-      const x = Math.max(minX, Math.min(maxX, ev.clientX - pOffX));
-      const y = Math.max(minY, Math.min(maxY, ev.clientY - pOffY));
-      $panel.css({ left: x + 'px', top: y + 'px' });
+      $panel.css({
+        left: Math.max(minX, Math.min(maxX, x)) + 'px',
+        top: Math.max(minY, Math.min(maxY, y)) + 'px',
+      });
     });
-    $(document).on('pointerup.wsppanel pointercancel.wsppanel', () => { pDrag = false; });
 
     $('.wsp-close').on('click', () => $panel.removeClass('wsp-open'));
     $('.wsp-tab').on('click', function () {

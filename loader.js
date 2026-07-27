@@ -5,8 +5,8 @@
 //
 // 如果 cdn.jsdelivr.net 连不上/很慢（常见于部分地区网路环境），
 // 把下面这行注释掉，改用底下任一条镜像线路：
-//   import('https://fastly.jsdelivr.net/gh/tony12345647/tonytest@v1.2.2/world-sim.js');
-//   import('https://gcore.jsdelivr.net/gh/tony12345647/tonytest@v1.2.2/world-sim.js');
-//   import('https://testingcf.jsdelivr.net/gh/tony12345647/tonytest@v1.2.2/world-sim.js');
+//   import('https://fastly.jsdelivr.net/gh/tony12345647/tonytest@v1.3.0/world-sim.js');
+//   import('https://gcore.jsdelivr.net/gh/tony12345647/tonytest@v1.3.0/world-sim.js');
+//   import('https://testingcf.jsdelivr.net/gh/tony12345647/tonytest@v1.3.0/world-sim.js');
 
-import('https://cdn.jsdelivr.net/gh/tony12345647/tonytest@v1.2.2/world-sim.js');
+import('https://cdn.jsdelivr.net/gh/tony12345647/tonytest@v1.3.0/world-sim.js');

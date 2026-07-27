@@ -1,5 +1,16 @@
 # 更新日志
 
+## v1.3.0
+拖曳与 API 设定：
+- **拖曳改成三种事件都支援**：抽出通用 `makeDraggable`，有 PointerEvent 就走 pointer，
+  没有就走 touch + mouse。之前只押注 pointer 事件，环境不吃就整个拖不动。
+- **API 三格永远显示**：之前 Base URL / Key / Model 藏在「API 来源」下拉选到
+  「自定义反代」才展开，多一道关卡就多一个坏掉的可能。现在一律显示，
+  下拉只决定实际用哪个来源。
+- 加「套用这组反代」按钮：一次把三格内容写入并切成自定义模式，
+  旁边显示目前实际使用哪个来源，不用猜。
+- 三格改成监听 `input`（不只 change）：手机上输入完直接切走有时不会触发 change，会白填。
+
 ## v1.2.2
 修复 v1.2.1 造成的「点不开面板」：
 - v1.2.1 把拖曳的 pointermove/pointerup 移到 document 上，但悬浮球仍然在 pointerdown
