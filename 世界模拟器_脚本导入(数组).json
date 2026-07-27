@@ -1,0 +1,24 @@
+[
+  {
+    "type": "script",
+    "enabled": true,
+    "name": "世界模拟器",
+    "id": "87d9b990-e0b3-4cbd-b54e-8fc46c932ad3",
+    "content": "// 世界模拟器 - 加载器\n// 这是唯一需要贴进 酒馆助手 → 脚本库 的内容。\n// 升级新版本时：只改下面这一行的 tag 版本号（例如 @v1.0.0 改成 @v1.1.0），存档即可，\n// 不用重新贴整段代码。\n//\n// 如果 cdn.jsdelivr.net 连不上/很慢（常见于部分地区网路环境），\n// 把下面这行注释掉，改用底下任一条镜像线路：\n//   import('https://fastly.jsdelivr.net/gh/tony12345647/tonytest@v1.0.0/world-sim.js');\n//   import('https://gcore.jsdelivr.net/gh/tony12345647/tonytest@v1.0.0/world-sim.js');\n//   import('https://testingcf.jsdelivr.net/gh/tony12345647/tonytest@v1.0.0/world-sim.js');\n\nimport('https://cdn.jsdelivr.net/gh/tony12345647/tonytest@v1.0.0/world-sim.js');\n",
+    "info": "悬浮面板背景世界模拟。这里只是个loader,实际逻辑从 github.com/tony12345647/tonytest 用 import() 动态加载,更新看该仓库 README。入口:脚本库「🌍 世界模拟器」按钮。",
+    "button": {
+      "enabled": true,
+      "buttons": [
+        {
+          "name": "🌍 世界模拟器",
+          "visible": true
+        }
+      ]
+    },
+    "data": {},
+    "export_with": {
+      "data": true,
+      "button": true
+    }
+  }
+]

@@ -20,11 +20,12 @@
     window.__world_sim_instance__.destroy();
   }
 
-  const SCRIPT_VERSION = '1.0.0';
+  const SCRIPT_VERSION = '1.1.0';
   const INJECT_KEY = 'world_sim_current';
   const INJECT_TAG = 'World_Current';
   const MAX_EVENTS = 12;
   const MAX_CONSEQUENCES = 12;
+  const MAX_REL_EVENTS = 30;
   const MAX_WORLDBOOK_NAMES = 60;
 
   const DEFAULT_SETTINGS = {
@@ -37,20 +38,51 @@
     historyN: 30,             // 每次模拟参考最近几楼聊天记录
     autoNarration: true,      // 重要事件是否用 /sys 插一条旁白
     injectState: true,        // 是否把世界状态注入到正式RP生成里
+    injectRelations: true,    // 关系网是否也一起注入(你的好感度世界书若已涵盖可关掉)
     injectDepth: 10,          // 注入聊天记录的第几层（对齐"现实层"预设卡）
     whitelist: '',            // 手动指定/升级的重要角色，逗号分隔
     useWorldTime: true,       // 是否读取预设的 TimeLocation 变量作为时间锚点
     useWorldbookNames: true,  // 是否读取世界书条目名称作为"已知世界元素"参考
     running: false,
+    ballX: null,              // 悬浮球位置记忆
+    ballY: null,
   };
 
-  const DEFAULT_STATE = { characters: {}, worldEvents: [], consequences: [], elapsedTicks: 0 };
+  const DEFAULT_STATE = {
+    characters: {}, worldEvents: [], consequences: [], relationshipEvents: [], elapsedTicks: 0,
+  };
+
+  // 关系状态 → 颜色（关键字匹配，AI 输出中文标签时用来上色）
+  const REL_COLORS = [
+    [/结婚|夫妻|已婚|伴侣/, '#e05a7a'],
+    [/订婚|未婚/, '#e0728a'],
+    [/交往|恋人|情侣|在一起/, '#e07a9a'],
+    [/暧昧|喜欢|单恋|心动/, '#d38ab5'],
+    [/闺蜜|好兄弟|挚友|死党/, '#4fb06a'],
+    [/朋友|友好|交好/, '#5a9e5f'],
+    [/家人|亲人|兄妹|姐弟|父|母/, '#d99a4e'],
+    [/师徒|同事|同学|同僚|搭档/, '#5b7fc7'],
+    [/赌气|冷战|闹别扭|疏远|尴尬/, '#c9a227'],
+    [/冲突|不和|敌对|仇|讨厌|反目/, '#c05050'],
+    [/绝交|断绝|决裂/, '#8a3a3a'],
+  ];
+
+  function relColor(type) {
+    const t = String(type || '');
+    for (const [re, color] of REL_COLORS) {
+      if (re.test(t)) return color;
+    }
+    return '#6b6c78';
+  }
 
   let settings = { ...DEFAULT_SETTINGS };
   let floorCounter = 0;
   let minuteTimer = null;
   let isTicking = false;
   let msgListenerHandle = null;
+  let cachedState = { ...DEFAULT_STATE };
+  let activeTab = 'npc';
+  let expandedNpc = null;
 
   // ---------- 设置持久化(全局变量) ----------
   async function loadSettings() {
@@ -76,14 +108,16 @@
   async function loadWorldState() {
     try {
       const vars = await getVariables({ type: 'chat' });
-      return { ...DEFAULT_STATE, ...(vars && vars.world_sim_state) };
+      cachedState = { ...DEFAULT_STATE, ...(vars && vars.world_sim_state) };
     } catch (e) {
       log('读取世界状态失败：' + e.message);
-      return { ...DEFAULT_STATE };
+      cachedState = { ...DEFAULT_STATE };
     }
+    return cachedState;
   }
 
   async function saveWorldState(state) {
+    cachedState = state;
     try {
       await insertOrAssignVariables({ world_sim_state: state }, { type: 'chat' });
     } catch (e) {
@@ -113,6 +147,10 @@
       status: 'resolved',
       archived: true,
     }));
+    // 关系变动时间线只保留最近 N 条（旧的直接丢弃，当前关系已存在角色身上）
+    if ((state.relationshipEvents || []).length > MAX_REL_EVENTS) {
+      state.relationshipEvents = state.relationshipEvents.slice(-MAX_REL_EVENTS);
+    }
     return state;
   }
 
@@ -147,6 +185,14 @@
       for (const [name, c] of chars) {
         const withWho = c.with ? `，正与${c.with}互动` : '';
         lines.push(`- ${name}：在${c.location || '未知处'}，${c.activity || '状态不明'}${withWho}。（${c.lastEvent || ''}）`);
+        if (c.pregnancy) lines.push(`  · 身孕：${c.pregnancy}`);
+        if ((c.children || []).length) lines.push(`  · 子女：${c.children.join('、')}`);
+        if (settings.injectRelations && (c.relationships || []).length) {
+          const rel = c.relationships
+            .map(r => `${r.target}[${r.type || '未定'}]${r.relation ? '：' + r.relation : ''}`)
+            .join('；');
+          lines.push(`  · 关系：${rel}`);
+        }
       }
     }
     if ((state.worldEvents || []).length) {
@@ -159,6 +205,12 @@
       lines.push('[过往行为的后续影响]');
       for (const c of state.consequences) {
         lines.push(`- 起因：${c.origin}｜现状：${c.currentDevelopment}（${c.status === 'resolved' ? '已了结' : '进行中'}）`);
+      }
+    }
+    if (settings.injectRelations && (state.relationshipEvents || []).length) {
+      lines.push('[最近的关系变动]');
+      for (const e of state.relationshipEvents.slice(-5)) {
+        lines.push(`- ${e.a} 与 ${e.b}：${e.from || '?'} → ${e.to}${e.reason ? '（' + e.reason + '）' : ''}`);
       }
     }
     return lines.join('\n') || '（世界暂无值得一提的变化）';
@@ -265,12 +317,36 @@
       knownElements.length ? `- 已知世界元素参考(可能是地点/人物/设定，非全部)：${knownElements.join('、')}。描述地点或事物时优先从中选取，避免凭空发明明显矛盾的新地名。` : '',
       '',
       '输出格式：',
-      '{"characters":[{"name":"角色名","location":"目前位置","activity":"正在做的事","interacting_with":"互动对象或null","summary":"这段时间发生的简短经过(不超过60字)","visible":true或false,"narration":"若visible为true，给玩家看的一句旁白，否则为空字符串"}],',
+      '{"characters":[{"name":"角色名","location":"目前位置","activity":"正在做的事","interacting_with":"互动对象或null","summary":"这段时间发生的简短经过(不超过60字)","pregnancy":"怀孕状态描述，如\\"怀孕约3个月，孩子父亲是XX\\"，没有就填null","children":["孩子的名字与年龄，如\\"小星(1岁)\\"，没有就空数组"],"relationships":[{"target":"另一个重要角色名","type":"关系状态标签","relation":"两人目前关系的简短描述(不超过25字)"}],"visible":true或false,"narration":"若visible为true，给玩家看的一句旁白，否则为空字符串"}],',
       '"world_events":[{"summary":"世界发生的大小事","status":"ongoing或resolved"}],',
-      '"consequences":[{"origin":"源于玩家之前做过的什么事(需能对应历史记录)","current_development":"现在发酵到什么程度了","status":"ongoing或resolved"}]}',
+      '"consequences":[{"origin":"源于玩家之前做过的什么事(需能对应历史记录)","current_development":"现在发酵到什么程度了","status":"ongoing或resolved"}],',
+      '"relationship_events":[{"a":"角色A","b":"角色B","from":"变化前的关系状态","to":"变化后的关系状态","reason":"为什么会变(不超过30字)"}]}',
+      '',
+      'NPC 之间的关系演化（重点）：',
+      '- 角色之间会自己发展感情与矛盾，不需要玩家介入。他们会因为长期相处、共同经历、',
+      '  误会、争执而让关系前进或倒退。',
+      '- type 用简短中文标签，例如：陌生、点头之交、同学、同事、师徒、朋友、好兄弟、闺蜜、',
+      '  暧昧、交往、订婚、结婚、家人、赌气、冷战、疏远、冲突、敌对、绝交。',
+      '- 关系要循序渐进，不可跳级：陌生的两人不会突然结婚，朋友要先经过暧昧才可能交往，',
+      '  一次小争执只会变成"赌气"而不是"绝交"。每次模拟最多让一对关系推进或倒退一个阶段。',
+      '- 大多数时候关系维持原状即可，只有发生了足以改变关系的事件时才变动。',
+      '- 关系必须双向一致：若 A 对 B 是"交往"，B 对 A 也必须是"交往"。',
+      '- 只要有任何一对关系的 type 与"当前世界状态"里的不同，就必须在 relationship_events',
+      '  里列出这次变化；没有变化就给空数组。',
+      '',
+      '人生阶段（照实记录，不要回避）：',
+      '- NPC 的人生会自然推进：交往、同居、结婚、怀孕、生小孩、养育孩子，都是这个世界的常态。',
+      '- 不要因为题材敏感就跳过、淡化或拒绝记录这些；也不要主动阻止或"修正"它已经发生的事实。',
+      '- pregnancy / children 只需要客观陈述状态（是否怀孕、几个月、孩子是谁的、孩子几岁），',
+      '  不需要描写过程或任何性相关细节，这里是状态台账不是剧情正文。',
+      '- 怀孕与生育要符合时间逻辑：需要先有对应的亲密关系，怀孕后要经过足够的时间才会生产，',
+      '  不可以一次模拟就从"交往"直接跳到"孩子3岁"。',
+      '- 孩子出生、确认怀孕这类事件，要同时写进 world_events 让玩家知道。',
       '',
       '规则：',
       '- 大部分日常事件应该琐碎(上课、吃饭、睡觉、闲聊)，只有少数重要事件 visible 才设 true。',
+      '- relationships 只写"该角色与其他重要角色之间"的关系，不要写与路人的关系；',
+      '  关系描述要反映剧情里实际发生过的事，没有交集就不要写。',
       '- consequences 只能基于"最近剧情摘要"或"当前世界状态"里已经存在的线索去推进，不要凭空编造玩家没做过的事。',
       '- 如果某个已追踪角色这段时间没有变化，也要照实给出(不用编造戏剧性发展)。',
     ].filter(Boolean).join('\n');
@@ -321,6 +397,23 @@
     });
   }
 
+  // 关系双向补齐：AI 只写了 A→B 时，自动补上 B→A，避免关系网单边
+  function mirrorRelationships(characters) {
+    for (const [name, c] of Object.entries(characters)) {
+      for (const rel of c.relationships || []) {
+        const other = characters[rel.target];
+        if (!other) continue;  // 对象不在追踪名单里就不补
+        other.relationships = other.relationships || [];
+        const back = other.relationships.find(r => r.target === name);
+        if (!back) {
+          other.relationships.push({ target: name, type: rel.type, relation: rel.relation });
+        } else if (!back.type && rel.type) {
+          back.type = rel.type;
+        }
+      }
+    }
+  }
+
   function mergeByKey(existingList, incomingList, keyFn) {
     const map = new Map((existingList || []).filter(x => !x.archived).map(x => [keyFn(x), x]));
     const archived = (existingList || []).filter(x => x.archived);
@@ -337,6 +430,7 @@
       return;
     }
     isTicking = true;
+    setBallBusy(true);
     log(manual ? '手动触发模拟…' : '世界演化中…');
     try {
       const mainCast = getMainCastNames();
@@ -359,6 +453,13 @@
           activity: c.activity,
           with: c.interacting_with || null,
           lastEvent: c.summary || '',
+          pregnancy: c.pregnancy || null,
+          children: Array.isArray(c.children) ? c.children.filter(Boolean) : (worldState.characters[c.name]?.children || []),
+          relationships: Array.isArray(c.relationships)
+            ? c.relationships.filter(r => r && r.target).map(r => ({
+                target: r.target, type: r.type || '', relation: r.relation || '',
+              }))
+            : (worldState.characters[c.name]?.relationships || []),
           updatedAt: Date.now(),
         };
         if (settings.autoNarration && c.visible && c.narration) {
@@ -383,14 +484,31 @@
         c => c.origin
       );
 
+      mirrorRelationships(worldState.characters);
+
+      // 关系变动：追加到时间线，并广播到日志
+      const relEvents = (result.relationship_events || [])
+        .filter(e => e && e.a && e.b)
+        .map(e => ({
+          a: e.a, b: e.b, from: e.from || '', to: e.to || '',
+          reason: e.reason || '', tick: worldState.elapsedTicks, at: Date.now(),
+        }));
+      if (relEvents.length) {
+        worldState.relationshipEvents = [...(worldState.relationshipEvents || []), ...relEvents];
+        for (const e of relEvents) {
+          log(`💞 ${e.a} 与 ${e.b}：${e.from || '?'} → ${e.to}`);
+        }
+      }
+
       compressWorldState(worldState);
       await saveWorldState(worldState);
-      refreshEditorFromState(worldState);
+      renderActiveTab();
       log('本轮模拟完成 ✓');
     } catch (e) {
       log('模拟出错：' + e.message);
     } finally {
       isTicking = false;
+      setBallBusy(false);
     }
   }
 
@@ -422,194 +540,390 @@
     }
   }
 
-  // ---------- 手动修正 / 升降级 ----------
-  async function refreshEditorFromState(state) {
-    const s = state || (await loadWorldState());
-    $('#wsp-editor').val(JSON.stringify(s, null, 2));
-    const $sel = $('#wsp-archive-select');
-    $sel.empty();
-    Object.keys(s.characters || {}).forEach(name => {
-      $sel.append(`<option value="${name}">${name}</option>`);
-    });
+  // ---------- 小工具 ----------
+  function esc(text) {
+    return $('<div>').text(text == null ? '' : String(text)).html();
   }
 
-  // ---------- 悬浮面板 ----------
   function log(text) {
     const $log = $('#wsp-log');
     if ($log.length) {
       const time = new Date().toLocaleTimeString();
-      $log.prepend(`<div>[${time}] ${text}</div>`);
-      while ($log.children().length > 30) $log.children().last().remove();
+      $log.prepend(`<div>[${time}] ${esc(text)}</div>`);
+      while ($log.children().length > 40) $log.children().last().remove();
     }
     console.log('[世界模拟器]', text);
   }
 
-  function buildPanel() {
-    $('#world-sim-panel').remove();
+  function setBallBusy(busy) {
+    $('#wsp-ball').toggleClass('wsp-busy', !!busy);
+  }
 
-    const $panel = $(`
-      <div id="world-sim-panel" style="position:fixed;top:80px;right:20px;z-index:9999;
-           width:340px;background:#1e1e1e;color:#eee;border-radius:8px;padding:10px;
-           box-shadow:0 4px 12px rgba(0,0,0,.5);font-size:13px;font-family:sans-serif;">
-        <div id="wsp-header" style="cursor:move;font-weight:bold;display:flex;justify-content:space-between;align-items:center;">
-          <span>🌍 世界模拟器 v${SCRIPT_VERSION}</span>
-          <span id="wsp-collapse" style="cursor:pointer;">▁</span>
+  // ---------- 样式 ----------
+  function injectStyle() {
+    $('#wsp-style').remove();
+    $(`<style id="wsp-style">
+      #wsp-ball {
+        position: fixed; z-index: 10000; width: 52px; height: 52px; border-radius: 50%;
+        background: linear-gradient(145deg, #5b7fc7, #35508c);
+        color: #fff; display: flex; align-items: center; justify-content: center;
+        font-size: 24px; cursor: grab; user-select: none;
+        box-shadow: 0 4px 14px rgba(0,0,0,.45); transition: transform .15s;
+      }
+      #wsp-ball:hover { transform: scale(1.08); }
+      #wsp-ball.wsp-busy { animation: wsp-spin 1.4s linear infinite; }
+      @keyframes wsp-spin { to { transform: rotate(360deg); } }
+
+      #wsp-panel {
+        position: fixed; z-index: 10000; width: 560px; height: 460px;
+        background: #1b1b1f; color: #e8e8ea; border-radius: 10px;
+        box-shadow: 0 8px 30px rgba(0,0,0,.55); font-size: 13px;
+        font-family: system-ui, sans-serif; display: none; overflow: hidden;
+        flex-direction: column; border: 1px solid #33343a;
+      }
+      #wsp-panel.wsp-open { display: flex; }
+      #wsp-titlebar {
+        height: 34px; flex: none; display: flex; align-items: center; justify-content: space-between;
+        padding: 0 10px; background: #232429; cursor: move; font-weight: 600;
+        border-bottom: 1px solid #33343a;
+      }
+      #wsp-titlebar .wsp-close { cursor: pointer; opacity: .7; font-size: 16px; }
+      #wsp-titlebar .wsp-close:hover { opacity: 1; }
+      #wsp-main { flex: 1; display: flex; min-height: 0; }
+      #wsp-tabs {
+        width: 120px; flex: none; background: #202127; border-right: 1px solid #33343a;
+        padding: 8px 0; display: flex; flex-direction: column; gap: 2px;
+      }
+      .wsp-tab {
+        padding: 9px 12px; cursor: pointer; border-left: 3px solid transparent;
+        color: #a8a9b4; white-space: nowrap;
+      }
+      .wsp-tab:hover { background: #282a31; color: #ddd; }
+      .wsp-tab.active { background: #2b2d36; color: #fff; border-left-color: #5b7fc7; }
+      #wsp-content { flex: 1; overflow-y: auto; padding: 12px; min-width: 0; }
+
+      #wsp-content h3 { margin: 0 0 8px; font-size: 13px; color: #9fb4e0; font-weight: 600; }
+      #wsp-content .wsp-sec { margin-bottom: 16px; }
+      #wsp-content label { display: block; margin-bottom: 8px; color: #c9cad2; }
+      #wsp-content input[type=text], #wsp-content input[type=password],
+      #wsp-content input[type=number], #wsp-content select, #wsp-content textarea {
+        width: 100%; box-sizing: border-box; margin-top: 3px; padding: 5px 7px;
+        background: #16171b; color: #e8e8ea; border: 1px solid #3a3b43; border-radius: 4px;
+      }
+      #wsp-content input[type=checkbox] { margin-right: 6px; vertical-align: -1px; }
+      #wsp-content button {
+        padding: 6px 10px; background: #394260; color: #e8e8ea;
+        border: 1px solid #4a5478; border-radius: 4px; cursor: pointer;
+      }
+      #wsp-content button:hover { background: #455075; }
+
+      .wsp-npc { border: 1px solid #33343a; border-radius: 6px; margin-bottom: 6px; overflow: hidden; }
+      .wsp-npc-head {
+        padding: 8px 10px; cursor: pointer; display: flex; justify-content: space-between;
+        align-items: center; background: #232429;
+      }
+      .wsp-npc-head:hover { background: #2a2c33; }
+      .wsp-npc-name { font-weight: 600; }
+      .wsp-npc-brief { color: #8f909b; font-size: 12px; }
+      .wsp-npc-body { padding: 10px; background: #1d1e23; display: none; }
+      .wsp-npc.open .wsp-npc-body { display: block; }
+      .wsp-field { margin-bottom: 6px; }
+      .wsp-field b { color: #9fb4e0; font-weight: 600; margin-right: 4px; }
+      .wsp-rel { padding: 4px 8px; margin: 3px 0; background: #24262d; border-radius: 4px;
+                 border-left: 2px solid #5b7fc7; }
+      .wsp-empty { color: #71727d; text-align: center; padding: 24px 0; }
+      .wsp-item { padding: 8px 10px; margin-bottom: 6px; background: #232429;
+                  border-radius: 5px; border-left: 3px solid #5b7fc7; }
+      .wsp-item.done { border-left-color: #4a7c59; opacity: .72; }
+      .wsp-badge { font-size: 11px; padding: 1px 6px; border-radius: 8px;
+                   background: #394260; color: #c3cbe6; margin-left: 6px; }
+      #wsp-log { max-height: 160px; overflow-y: auto; background: #131418;
+                 padding: 6px; border-radius: 4px; font-size: 11px;
+                 font-family: monospace; color: #8f909b; }
+      #wsp-editor { height: 200px; font-family: monospace; font-size: 11px; color: #8fd98f; }
+      .wsp-row { display: flex; gap: 6px; align-items: center; }
+      .wsp-row > * { flex: 1; }
+      .wsp-row > button { flex: none; }
+    </style>`).appendTo('head');
+  }
+
+  // ---------- 分页渲染 ----------
+  function renderSettingsTab() {
+    const s = settings;
+    return `
+      <div class="wsp-sec">
+        <h3>运行控制</h3>
+        <div class="wsp-row" style="margin-bottom:10px;">
+          <button id="wsp-toggle">${s.running ? '⏸ 停止' : '▶ 开始'}</button>
+          <button id="wsp-run-now">⚡ 立即跑一次</button>
         </div>
-        <div id="wsp-body" style="margin-top:8px;">
-          <label style="display:block;margin-top:6px;">API 来源(背景模拟用)
-            <select id="wsp-apiMode" style="width:100%;">
-              <option value="shared">沿用 ST 当前连线</option>
-              <option value="custom">自定义反代</option>
+        <label>触发方式
+          <div class="wsp-row">
+            <select id="wsp-mode">
+              <option value="floor"${s.triggerMode === 'floor' ? ' selected' : ''}>每 N 楼</option>
+              <option value="minute"${s.triggerMode === 'minute' ? ' selected' : ''}>每 N 分钟</option>
             </select>
-          </label>
-          <div id="wsp-custom-fields" style="display:none;">
-            <label style="display:block;margin-top:4px;">Base URL
-              <input id="wsp-url" style="width:100%;" placeholder="https://gcli.ggchan.dev/v1">
-            </label>
-            <label style="display:block;margin-top:4px;">API Key
-              <input id="wsp-key" type="password" style="width:100%;">
-            </label>
-            <label style="display:block;margin-top:4px;">Model
-              <input id="wsp-model" style="width:100%;" placeholder="gemini-3.1-pro-preview">
-            </label>
+            <input type="number" id="wsp-n" min="1" value="${s.triggerN}">
           </div>
-          <label style="display:block;margin-top:6px;">触发方式
-            <select id="wsp-mode" style="width:58%;">
-              <option value="floor">每 N 楼</option>
-              <option value="minute">每 N 分钟</option>
-            </select>
-            <input id="wsp-n" type="number" min="1" value="10" style="width:35%;">
-          </label>
-          <label style="display:block;margin-top:6px;">参考最近几楼历史
-            <input id="wsp-historyN" type="number" min="5" style="width:100%;">
-          </label>
-          <label style="display:block;margin-top:6px;">
-            <input id="wsp-narration" type="checkbox"> 重要事件自动插入旁白到聊天
-          </label>
-          <label style="display:block;margin-top:4px;">
-            <input id="wsp-inject" type="checkbox"> 把世界状态注入到正式RP生成(不含指令，只含状态)
-          </label>
-          <label style="display:block;margin-top:4px;">
-            <input id="wsp-usetime" type="checkbox"> 读取预设 TimeLocation 变量作为时间锚点
-          </label>
-          <label style="display:block;margin-top:4px;">
-            <input id="wsp-useworldbook" type="checkbox"> 读取世界书条目名称避免AI瞎编地名
-          </label>
-          <div style="margin-top:8px;display:flex;gap:6px;">
-            <button id="wsp-toggle" style="flex:1;">▶ 开始</button>
-            <button id="wsp-run-now" style="flex:1;">立即跑一次</button>
-          </div>
+        </label>
+        <label>参考最近几楼历史
+          <input type="number" id="wsp-historyN" min="5" value="${s.historyN}">
+        </label>
+      </div>
 
-          <div style="margin-top:10px;border-top:1px solid #444;padding-top:6px;">
-            <div style="font-weight:bold;">🧑‍🤝‍🧑 角色升降级</div>
-            <div style="display:flex;gap:4px;margin-top:4px;">
-              <input id="wsp-promote-name" placeholder="角色名" style="flex:1;">
-              <button id="wsp-promote-btn">➕ 升级为重要角色</button>
-            </div>
-            <div style="display:flex;gap:4px;margin-top:4px;">
-              <select id="wsp-archive-select" style="flex:1;"></select>
-              <button id="wsp-archive-btn">🗄 归档移除</button>
-            </div>
-          </div>
+      <div class="wsp-sec">
+        <h3>API 来源（背景模拟用）</h3>
+        <label>
+          <select id="wsp-apiMode">
+            <option value="shared"${s.apiMode === 'shared' ? ' selected' : ''}>沿用 ST 当前连线</option>
+            <option value="custom"${s.apiMode === 'custom' ? ' selected' : ''}>自定义反代</option>
+          </select>
+        </label>
+        <div id="wsp-custom-fields" style="display:${s.apiMode === 'custom' ? 'block' : 'none'};">
+          <label>Base URL
+            <input type="text" id="wsp-url" value="${esc(s.customUrl)}" placeholder="https://gcli.ggchan.dev/v1">
+          </label>
+          <label>API Key
+            <input type="password" id="wsp-key" value="${esc(s.customKey)}">
+          </label>
+          <label>Model
+            <input type="text" id="wsp-model" value="${esc(s.customModel)}" placeholder="gemini-3.1-pro-preview">
+          </label>
+        </div>
+      </div>
 
-          <div style="margin-top:10px;border-top:1px solid #444;padding-top:6px;">
-            <div id="wsp-editor-toggle" style="font-weight:bold;cursor:pointer;">✏️ 手动修正世界状态(JSON) ▾</div>
-            <div id="wsp-editor-wrap" style="display:none;">
-              <textarea id="wsp-editor" style="width:100%;height:160px;margin-top:4px;
-                background:#111;color:#0f0;font-family:monospace;font-size:11px;"></textarea>
-              <div style="display:flex;gap:6px;margin-top:4px;">
-                <button id="wsp-editor-save" style="flex:1;">💾 保存修改</button>
-                <button id="wsp-editor-reload" style="flex:1;">🔄 重新载入</button>
+      <div class="wsp-sec">
+        <h3>注入与行为</h3>
+        <label><input type="checkbox" id="wsp-inject"${s.injectState ? ' checked' : ''}>把世界状态注入正式RP（只含状态，不含指令）</label>
+        <label><input type="checkbox" id="wsp-injectrel"${s.injectRelations ? ' checked' : ''}>关系网也一起注入（好感度世界书已涵盖可关掉）</label>
+        <label><input type="checkbox" id="wsp-narration"${s.autoNarration ? ' checked' : ''}>重要事件自动插入旁白到聊天</label>
+        <label><input type="checkbox" id="wsp-usetime"${s.useWorldTime ? ' checked' : ''}>读取预设 TimeLocation 作为时间锚点</label>
+        <label><input type="checkbox" id="wsp-useworldbook"${s.useWorldbookNames ? ' checked' : ''}>读取世界书条目名称避免瞎编地名</label>
+        <label>注入深度（对齐预设"现实层"插槽）
+          <input type="number" id="wsp-depth" min="0" value="${s.injectDepth}">
+        </label>
+      </div>
+    `;
+  }
+
+  function renderNpcTab() {
+    const chars = Object.entries(cachedState.characters || {});
+    let html = `
+      <div class="wsp-sec">
+        <h3>加入追踪</h3>
+        <div class="wsp-row">
+          <input type="text" id="wsp-promote-name" placeholder="角色名">
+          <button id="wsp-promote-btn">➕ 加入</button>
+        </div>
+      </div>
+      <div class="wsp-sec">
+        <h3>NPC 状态（${chars.length}）</h3>
+    `;
+
+    if (!chars.length) {
+      html += `<div class="wsp-empty">还没有任何 NPC 资料<br>先按「设置 → 立即跑一次」推演世界</div>`;
+    } else {
+      for (const [name, c] of chars) {
+        const isOpen = expandedNpc === name;
+        const rels = c.relationships || [];
+        html += `
+          <div class="wsp-npc${isOpen ? ' open' : ''}" data-npc="${esc(name)}">
+            <div class="wsp-npc-head">
+              <span class="wsp-npc-name">${esc(name)}${c.pregnancy ? ' 🤰' : ''}${(c.children || []).length ? ' 👶' : ''}</span>
+              <span class="wsp-npc-brief">${esc(c.location || '未知')} · ${esc(c.activity || '状态不明')}</span>
+            </div>
+            <div class="wsp-npc-body">
+              <div class="wsp-field"><b>位置</b>${esc(c.location || '未知')}</div>
+              <div class="wsp-field"><b>行为</b>${esc(c.activity || '状态不明')}</div>
+              <div class="wsp-field"><b>互动对象</b>${esc(c.with || '无')}</div>
+              <div class="wsp-field"><b>近况</b>${esc(c.lastEvent || '—')}</div>
+              ${c.pregnancy ? `<div class="wsp-field"><b>身孕</b><span style="color:#e08ab5;">${esc(c.pregnancy)}</span></div>` : ''}
+              ${(c.children || []).length ? `<div class="wsp-field"><b>子女</b>${c.children.map(k => `<span class="wsp-badge" style="background:#d99a4e;color:#fff;">${esc(k)}</span>`).join(' ')}</div>` : ''}
+              <div class="wsp-field"><b>关系网</b>${rels.length ? '' : '（尚无记录）'}</div>
+              ${rels.map(r => `
+                <div class="wsp-rel" style="border-left-color:${relColor(r.type)};">
+                  <b>${esc(r.target)}</b>
+                  <span class="wsp-badge" style="background:${relColor(r.type)};color:#fff;">${esc(r.type || '未定')}</span>
+                  ${r.relation ? `<div style="margin-top:2px;color:#a8a9b4;">${esc(r.relation)}</div>` : ''}
+                </div>
+              `).join('')}
+              <div style="margin-top:10px;">
+                <button class="wsp-remove-npc" data-npc="${esc(name)}">🗄 移出追踪</button>
               </div>
             </div>
           </div>
+        `;
+      }
+    }
+    html += '</div>';
+    return html;
+  }
 
-          <div id="wsp-log" style="max-height:150px;overflow:auto;margin-top:8px;
-               background:#111;padding:4px;border-radius:4px;"></div>
+  function renderRelationsTab() {
+    const relEvents = [...(cachedState.relationshipEvents || [])].reverse();
+    const chars = Object.entries(cachedState.characters || {});
+
+    // 汇总所有关系对（去重，A-B 只显示一次）
+    const pairs = new Map();
+    for (const [name, c] of chars) {
+      for (const r of c.relationships || []) {
+        const key = [name, r.target].sort().join(' ');
+        if (!pairs.has(key)) {
+          pairs.set(key, { a: name, b: r.target, type: r.type, relation: r.relation });
+        }
+      }
+    }
+
+    let html = `<div class="wsp-sec"><h3>关系变动时间线（${relEvents.length}）</h3>`;
+    if (!relEvents.length) {
+      html += `<div class="wsp-empty">还没有关系变动<br><span style="font-size:11px;">NPC 之间会随着相处自己发展感情或产生矛盾</span></div>`;
+    } else {
+      for (const e of relEvents) {
+        html += `<div class="wsp-item" style="border-left-color:${relColor(e.to)};">
+          <div><b>${esc(e.a)}</b> 与 <b>${esc(e.b)}</b></div>
+          <div style="margin-top:3px;">
+            <span class="wsp-badge" style="background:#3a3b43;">${esc(e.from || '?')}</span>
+            <span style="color:#71727d;">→</span>
+            <span class="wsp-badge" style="background:${relColor(e.to)};color:#fff;">${esc(e.to)}</span>
+          </div>
+          ${e.reason ? `<div style="margin-top:3px;color:#a8a9b4;font-size:12px;">${esc(e.reason)}</div>` : ''}
+        </div>`;
+      }
+    }
+    html += '</div>';
+
+    html += `<div class="wsp-sec"><h3>目前的关系一览（${pairs.size}）</h3>`;
+    if (!pairs.size) {
+      html += `<div class="wsp-empty">尚无关系记录</div>`;
+    } else {
+      for (const p of pairs.values()) {
+        html += `<div class="wsp-rel" style="border-left-color:${relColor(p.type)};">
+          <b>${esc(p.a)}</b> ↔ <b>${esc(p.b)}</b>
+          <span class="wsp-badge" style="background:${relColor(p.type)};color:#fff;">${esc(p.type || '未定')}</span>
+          ${p.relation ? `<div style="margin-top:2px;color:#a8a9b4;">${esc(p.relation)}</div>` : ''}
+        </div>`;
+      }
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderWorldTab() {
+    const events = cachedState.worldEvents || [];
+    const cons = cachedState.consequences || [];
+    let html = `<div class="wsp-sec"><h3>世界大小事（${events.length}）</h3>`;
+    if (!events.length) {
+      html += `<div class="wsp-empty">尚无世界事件记录</div>`;
+    } else {
+      for (const ev of events) {
+        const done = ev.status === 'resolved';
+        html += `<div class="wsp-item${done ? ' done' : ''}">
+          ${esc(ev.summary)}<span class="wsp-badge">${done ? '已了结' : '进行中'}</span>
+        </div>`;
+      }
+    }
+    html += '</div>';
+
+    html += `<div class="wsp-sec"><h3>我做过的事的后续发酵（${cons.length}）</h3>`;
+    if (!cons.length) {
+      html += `<div class="wsp-empty">尚无后续影响记录</div>`;
+    } else {
+      for (const c of cons) {
+        const done = c.status === 'resolved';
+        html += `<div class="wsp-item${done ? ' done' : ''}">
+          <div><b style="color:#9fb4e0;">起因</b> ${esc(c.origin)}</div>
+          <div style="margin-top:3px;"><b style="color:#9fb4e0;">现状</b> ${esc(c.currentDevelopment)}
+            <span class="wsp-badge">${done ? '已了结' : '进行中'}</span></div>
+        </div>`;
+      }
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderAdvancedTab() {
+    return `
+      <div class="wsp-sec">
+        <h3>手动修正世界状态（JSON）</h3>
+        <textarea id="wsp-editor"></textarea>
+        <div class="wsp-row" style="margin-top:6px;">
+          <button id="wsp-editor-save">💾 保存修改</button>
+          <button id="wsp-editor-reload">🔄 重新载入</button>
         </div>
       </div>
-    `).appendTo('body');
+      <div class="wsp-sec">
+        <h3>运行日志</h3>
+        <div id="wsp-log"></div>
+      </div>
+    `;
+  }
 
-    // 拖拽
-    let dragging = false, offsetX = 0, offsetY = 0;
-    $('#wsp-header').on('mousedown', e => {
-      dragging = true;
-      const pos = $panel[0].getBoundingClientRect();
-      offsetX = e.clientX - pos.left;
-      offsetY = e.clientY - pos.top;
-    });
-    $(document).on('mousemove.wsp', e => {
-      if (!dragging) return;
-      $panel.css({ left: e.clientX - offsetX + 'px', top: e.clientY - offsetY + 'px', right: 'auto' });
-    });
-    $(document).on('mouseup.wsp', () => { dragging = false; });
+  const TABS = [
+    { id: 'npc', label: '🧑 NPC 状态', render: renderNpcTab },
+    { id: 'relations', label: '💞 关系网', render: renderRelationsTab },
+    { id: 'world', label: '🌍 世界大小事', render: renderWorldTab },
+    { id: 'settings', label: '⚙️ 设置', render: renderSettingsTab },
+    { id: 'advanced', label: '🛠 高级/日志', render: renderAdvancedTab },
+  ];
 
-    // 折叠
-    $('#wsp-collapse').on('click', () => {
-      const $body = $('#wsp-body');
-      $body.toggle();
-      $('#wsp-collapse').text($body.is(':visible') ? '▁' : '▢');
-    });
-    $('#wsp-editor-toggle').on('click', () => {
-      $('#wsp-editor-wrap').toggle();
-    });
+  function renderActiveTab() {
+    const tab = TABS.find(t => t.id === activeTab) || TABS[0];
+    $('#wsp-content').html(tab.render());
+    $('.wsp-tab').removeClass('active').filter(`[data-tab="${activeTab}"]`).addClass('active');
+    bindTabEvents();
+  }
 
-    // 绑定设置控件
-    $('#wsp-apiMode').val(settings.apiMode).on('change', function () {
+  // ---------- 事件绑定 ----------
+  function bindTabEvents() {
+    // --- 设置页 ---
+    $('#wsp-toggle').on('click', () => {
+      settings.running = !settings.running;
+      saveSettings();
+      if (settings.running) { startMinuteTimer(); log('已启动'); }
+      else { stopMinuteTimer(); log('已停止'); }
+      $('#wsp-toggle').text(settings.running ? '⏸ 停止' : '▶ 开始');
+    });
+    $('#wsp-run-now').on('click', () => runWorldTick(true));
+    $('#wsp-apiMode').on('change', function () {
       settings.apiMode = this.value;
       $('#wsp-custom-fields').toggle(this.value === 'custom');
       saveSettings();
     });
-    $('#wsp-custom-fields').toggle(settings.apiMode === 'custom');
-    $('#wsp-url').val(settings.customUrl).on('change', function () { settings.customUrl = this.value; saveSettings(); });
-    $('#wsp-key').val(settings.customKey).on('change', function () { settings.customKey = this.value; saveSettings(); });
-    $('#wsp-model').val(settings.customModel).on('change', function () { settings.customModel = this.value; saveSettings(); });
+    $('#wsp-url').on('change', function () { settings.customUrl = this.value; saveSettings(); });
+    $('#wsp-key').on('change', function () { settings.customKey = this.value; saveSettings(); });
+    $('#wsp-model').on('change', function () { settings.customModel = this.value; saveSettings(); });
+    $('#wsp-mode').on('change', function () {
+      settings.triggerMode = this.value; saveSettings(); startMinuteTimer();
+    });
+    $('#wsp-n').on('change', function () {
+      settings.triggerN = parseInt(this.value, 10) || 1; saveSettings(); startMinuteTimer();
+    });
+    $('#wsp-historyN').on('change', function () {
+      settings.historyN = parseInt(this.value, 10) || 30; saveSettings();
+    });
+    $('#wsp-depth').on('change', async function () {
+      settings.injectDepth = parseInt(this.value, 10) || 0;
+      await saveSettings();
+      updateInjection(cachedState);
+    });
+    $('#wsp-inject').on('change', async function () {
+      settings.injectState = this.checked; await saveSettings(); updateInjection(cachedState);
+    });
+    $('#wsp-injectrel').on('change', async function () {
+      settings.injectRelations = this.checked; await saveSettings(); updateInjection(cachedState);
+    });
+    $('#wsp-narration').on('change', function () { settings.autoNarration = this.checked; saveSettings(); });
+    $('#wsp-usetime').on('change', function () { settings.useWorldTime = this.checked; saveSettings(); });
+    $('#wsp-useworldbook').on('change', function () { settings.useWorldbookNames = this.checked; saveSettings(); });
 
-    $('#wsp-mode').val(settings.triggerMode).on('change', function () {
-      settings.triggerMode = this.value;
-      saveSettings();
-      startMinuteTimer();
+    // --- NPC 页 ---
+    $('.wsp-npc-head').on('click', function () {
+      const name = $(this).closest('.wsp-npc').data('npc');
+      expandedNpc = (expandedNpc === name) ? null : name;
+      renderActiveTab();
     });
-    $('#wsp-n').val(settings.triggerN).on('change', function () {
-      settings.triggerN = parseInt(this.value, 10) || 1;
-      saveSettings();
-      startMinuteTimer();
-    });
-    $('#wsp-historyN').val(settings.historyN).on('change', function () {
-      settings.historyN = parseInt(this.value, 10) || 30;
-      saveSettings();
-    });
-    $('#wsp-narration').prop('checked', settings.autoNarration).on('change', function () {
-      settings.autoNarration = this.checked;
-      saveSettings();
-    });
-    $('#wsp-inject').prop('checked', settings.injectState).on('change', async function () {
-      settings.injectState = this.checked;
-      saveSettings();
-      updateInjection(await loadWorldState());
-    });
-    $('#wsp-usetime').prop('checked', settings.useWorldTime).on('change', function () {
-      settings.useWorldTime = this.checked;
-      saveSettings();
-    });
-    $('#wsp-useworldbook').prop('checked', settings.useWorldbookNames).on('change', function () {
-      settings.useWorldbookNames = this.checked;
-      saveSettings();
-    });
-
-    $('#wsp-toggle').on('click', () => {
-      settings.running = !settings.running;
-      $('#wsp-toggle').text(settings.running ? '⏸ 停止' : '▶ 开始');
-      saveSettings();
-      if (settings.running) { startMinuteTimer(); log('已启动'); }
-      else { stopMinuteTimer(); log('已停止'); }
-    });
-    $('#wsp-toggle').text(settings.running ? '⏸ 停止' : '▶ 开始');
-    $('#wsp-run-now').on('click', () => runWorldTick(true));
-
-    // 升降级
     $('#wsp-promote-btn').on('click', async () => {
-      const name = $('#wsp-promote-name').val().trim();
+      const name = String($('#wsp-promote-name').val() || '').trim();
       if (!name) return;
       const list = settings.whitelist.split(',').map(s => s.trim()).filter(Boolean);
       if (!list.includes(name)) list.push(name);
@@ -618,16 +932,18 @@
 
       const state = await loadWorldState();
       if (!state.characters[name]) {
-        state.characters[name] = { location: '未知', activity: '尚待模拟', with: null, lastEvent: '刚被标记为重要角色', updatedAt: Date.now() };
+        state.characters[name] = {
+          location: '未知', activity: '尚待模拟', with: null,
+          lastEvent: '刚被标记为重要角色', relationships: [], updatedAt: Date.now(),
+        };
       }
       await saveWorldState(state);
-      await refreshEditorFromState(state);
-      $('#wsp-promote-name').val('');
-      log(`已将「${name}」升级为重要角色`);
+      renderActiveTab();
+      log(`已将「${name}」加入追踪`);
     });
-    $('#wsp-archive-btn').on('click', async () => {
-      const name = $('#wsp-archive-select').val();
-      if (!name) return;
+    $('.wsp-remove-npc').on('click', async function (e) {
+      e.stopPropagation();
+      const name = $(this).data('npc');
       const list = settings.whitelist.split(',').map(s => s.trim()).filter(x => x && x !== name);
       settings.whitelist = list.join(',');
       await saveSettings();
@@ -635,36 +951,137 @@
       const state = await loadWorldState();
       delete state.characters[name];
       await saveWorldState(state);
-      await refreshEditorFromState(state);
-      log(`已归档移除「${name}」`);
+      if (expandedNpc === name) expandedNpc = null;
+      renderActiveTab();
+      log(`已将「${name}」移出追踪`);
     });
 
-    // 手动修正
-    $('#wsp-editor-save').on('click', async () => {
-      try {
-        const parsed = JSON.parse($('#wsp-editor').val());
-        await saveWorldState(parsed);
-        await refreshEditorFromState(parsed);
-        log('世界状态已手动保存');
-      } catch (e) {
-        log('JSON 格式错误：' + e.message);
+    // --- 高级页 ---
+    if (activeTab === 'advanced') {
+      $('#wsp-editor').val(JSON.stringify(cachedState, null, 2));
+      $('#wsp-editor-save').on('click', async () => {
+        try {
+          const parsed = JSON.parse($('#wsp-editor').val());
+          await saveWorldState(parsed);
+          log('世界状态已手动保存');
+        } catch (e) {
+          log('JSON 格式错误：' + e.message);
+        }
+      });
+      $('#wsp-editor-reload').on('click', async () => {
+        await loadWorldState();
+        $('#wsp-editor').val(JSON.stringify(cachedState, null, 2));
+        log('已重新载入世界状态');
+      });
+    }
+  }
+
+  // ---------- 建立悬浮球 + 面板 ----------
+  function buildUI() {
+    $('#wsp-ball, #wsp-panel').remove();
+    injectStyle();
+
+    const startX = settings.ballX != null ? settings.ballX : (window.innerWidth - 80);
+    const startY = settings.ballY != null ? settings.ballY : 120;
+
+    const $ball = $(`<div id="wsp-ball" title="世界模拟器 v${SCRIPT_VERSION}">🌍</div>`)
+      .css({ left: startX + 'px', top: startY + 'px' })
+      .appendTo('body');
+
+    const $panel = $(`
+      <div id="wsp-panel">
+        <div id="wsp-titlebar">
+          <span>🌍 世界模拟器 v${SCRIPT_VERSION}</span>
+          <span class="wsp-close">✕</span>
+        </div>
+        <div id="wsp-main">
+          <div id="wsp-tabs">
+            ${TABS.map(t => `<div class="wsp-tab" data-tab="${t.id}">${t.label}</div>`).join('')}
+          </div>
+          <div id="wsp-content"></div>
+        </div>
+      </div>
+    `).appendTo('body');
+
+    // --- 悬浮球拖拽（拖动不触发开关，只有真正的点击才开）---
+    let dragging = false, moved = false, offsetX = 0, offsetY = 0;
+    $ball.on('mousedown', e => {
+      dragging = true; moved = false;
+      const r = $ball[0].getBoundingClientRect();
+      offsetX = e.clientX - r.left;
+      offsetY = e.clientY - r.top;
+      e.preventDefault();
+    });
+    $(document).on('mousemove.wsp', e => {
+      if (!dragging) return;
+      moved = true;
+      const x = Math.max(0, Math.min(window.innerWidth - 52, e.clientX - offsetX));
+      const y = Math.max(0, Math.min(window.innerHeight - 52, e.clientY - offsetY));
+      $ball.css({ left: x + 'px', top: y + 'px' });
+    });
+    $(document).on('mouseup.wsp', () => {
+      if (!dragging) return;
+      dragging = false;
+      if (moved) {
+        const r = $ball[0].getBoundingClientRect();
+        settings.ballX = r.left;
+        settings.ballY = r.top;
+        saveSettings();
+      } else {
+        togglePanel();
       }
     });
-    $('#wsp-editor-reload').on('click', async () => {
-      await refreshEditorFromState(await loadWorldState());
-      log('已重新载入世界状态');
+
+    // --- 面板拖拽 ---
+    let pDrag = false, pOffX = 0, pOffY = 0;
+    $('#wsp-titlebar').on('mousedown', e => {
+      if ($(e.target).hasClass('wsp-close')) return;
+      pDrag = true;
+      const r = $panel[0].getBoundingClientRect();
+      pOffX = e.clientX - r.left;
+      pOffY = e.clientY - r.top;
+      e.preventDefault();
     });
+    $(document).on('mousemove.wsppanel', e => {
+      if (!pDrag) return;
+      $panel.css({ left: (e.clientX - pOffX) + 'px', top: (e.clientY - pOffY) + 'px' });
+    });
+    $(document).on('mouseup.wsppanel', () => { pDrag = false; });
+
+    $('.wsp-close').on('click', () => $panel.removeClass('wsp-open'));
+    $('.wsp-tab').on('click', function () {
+      activeTab = $(this).data('tab');
+      renderActiveTab();
+    });
+
+    renderActiveTab();
+  }
+
+  function togglePanel() {
+    const $panel = $('#wsp-panel');
+    if ($panel.hasClass('wsp-open')) {
+      $panel.removeClass('wsp-open');
+      return;
+    }
+    // 开启时定位到球旁边，并避免超出画面
+    const r = $('#wsp-ball')[0].getBoundingClientRect();
+    let left = r.left - 570;
+    if (left < 10) left = r.right + 10;
+    if (left + 560 > window.innerWidth) left = Math.max(10, window.innerWidth - 570);
+    let top = Math.min(r.top, window.innerHeight - 470);
+    if (top < 10) top = 10;
+    $panel.css({ left: left + 'px', top: top + 'px' }).addClass('wsp-open');
+    loadWorldState().then(renderActiveTab);
   }
 
   // ---------- 初始化 / 销毁 ----------
   async function init() {
     await loadSettings();
-    buildPanel();
+    await loadWorldState();
+    buildUI();
     registerFloorTrigger();
     if (settings.running) startMinuteTimer();
-    const state = await loadWorldState();
-    updateInjection(state);
-    await refreshEditorFromState(state);
+    updateInjection(cachedState);
     log(`世界模拟器 v${SCRIPT_VERSION} 已加载`);
   }
 
@@ -678,8 +1095,8 @@
       const ctx = SillyTavern.getContext();
       ctx.setExtensionPrompt(INJECT_KEY, '', ctx.extension_prompt_types.IN_CHAT, settings.injectDepth, false, ctx.extension_prompt_roles.SYSTEM);
     } catch (e) { /* noop */ }
-    $(document).off('.wsp');
-    $('#world-sim-panel').remove();
+    $(document).off('.wsp').off('.wsppanel');
+    $('#wsp-ball, #wsp-panel, #wsp-style').remove();
   }
 
   window.__world_sim_instance__ = { destroy };
