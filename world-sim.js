@@ -1,6 +1,8 @@
 // ============================================================
 // 世界模拟器 (酒馆助手 脚本，与【此间小镇HereBetween】预设配套)
-// 版本：见 SCRIPT_VERSION（配合 version.json 做更新检查）
+// 本体代码，由 loader.js 通过 import() 从 jsDelivr 动态加载。
+// 升级流程：改这个文件 → git commit → 打新 tag → push → 改 loader.js 里
+// 那一行的 tag 版本号即可，不需要重新贴整段代码。
 // ------------------------------------------------------------
 // 职责边界：
 //   1. 背景模拟自己的系统提示词，完全不引用/不携带此间小镇预设的98条prompt。
@@ -39,7 +41,6 @@
     whitelist: '',            // 手动指定/升级的重要角色，逗号分隔
     useWorldTime: true,       // 是否读取预设的 TimeLocation 变量作为时间锚点
     useWorldbookNames: true,  // 是否读取世界书条目名称作为"已知世界元素"参考
-    updateManifestUrl: '',    // version.json 的原始URL(raw)，用来检查更新
     running: false,
   };
 
@@ -421,54 +422,6 @@
     }
   }
 
-  // ---------- 版本检查 / 更新 ----------
-  function isNewerVersion(a, b) {
-    const pa = String(a).split('.').map(Number);
-    const pb = String(b).split('.').map(Number);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-      const x = pa[i] || 0, y = pb[i] || 0;
-      if (x > y) return true;
-      if (x < y) return false;
-    }
-    return false;
-  }
-
-  let pendingManifest = null;
-
-  async function checkForUpdate(manual = false) {
-    if (!settings.updateManifestUrl) {
-      if (manual) log('尚未设定更新检查网址(version.json 的 raw 链接)');
-      return;
-    }
-    try {
-      const res = await fetch(settings.updateManifestUrl, { cache: 'no-store' });
-      const manifest = await res.json();
-      if (isNewerVersion(manifest.version, SCRIPT_VERSION)) {
-        pendingManifest = manifest;
-        $('#wsp-update-banner').show();
-        $('#wsp-update-text').text(`发现新版本 v${manifest.version}（当前 v${SCRIPT_VERSION}）：${manifest.changelog || ''}`);
-      } else {
-        pendingManifest = null;
-        $('#wsp-update-banner').hide();
-        if (manual) log('已是最新版本 v' + SCRIPT_VERSION);
-      }
-    } catch (e) {
-      if (manual) log('检查更新失败：' + e.message);
-    }
-  }
-
-  async function applyUpdate() {
-    if (!pendingManifest || !pendingManifest.script_url) return;
-    try {
-      const res = await fetch(pendingManifest.script_url, { cache: 'no-store' });
-      const code = await res.text();
-      await navigator.clipboard.writeText(code);
-      log(`已复制 v${pendingManifest.version} 代码到剪贴板 → 到脚本库编辑框 Ctrl+A、Ctrl+V 覆盖后保存`);
-    } catch (e) {
-      log('取得新版代码失败：' + e.message);
-    }
-  }
-
   // ---------- 手动修正 / 升降级 ----------
   async function refreshEditorFromState(state) {
     const s = state || (await loadWorldState());
@@ -501,11 +454,6 @@
         <div id="wsp-header" style="cursor:move;font-weight:bold;display:flex;justify-content:space-between;align-items:center;">
           <span>🌍 世界模拟器 v${SCRIPT_VERSION}</span>
           <span id="wsp-collapse" style="cursor:pointer;">▁</span>
-        </div>
-        <div id="wsp-update-banner" style="display:none;background:#3a2f00;border:1px solid #a67c00;
-             border-radius:4px;padding:6px;margin-top:6px;">
-          <div id="wsp-update-text" style="font-size:12px;"></div>
-          <button id="wsp-update-apply" style="margin-top:4px;width:100%;">📋 复制新版代码</button>
         </div>
         <div id="wsp-body" style="margin-top:8px;">
           <label style="display:block;margin-top:6px;">API 来源(背景模拟用)
@@ -574,12 +522,6 @@
                 <button id="wsp-editor-reload" style="flex:1;">🔄 重新载入</button>
               </div>
             </div>
-          </div>
-
-          <div style="margin-top:10px;border-top:1px solid #444;padding-top:6px;">
-            <div style="font-weight:bold;">🔄 更新检查</div>
-            <input id="wsp-update-url" style="width:100%;margin-top:4px;" placeholder="version.json 的 raw 链接">
-            <button id="wsp-check-update" style="width:100%;margin-top:4px;">检查更新</button>
           </div>
 
           <div id="wsp-log" style="max-height:150px;overflow:auto;margin-top:8px;
@@ -712,14 +654,6 @@
       await refreshEditorFromState(await loadWorldState());
       log('已重新载入世界状态');
     });
-
-    // 更新检查
-    $('#wsp-update-url').val(settings.updateManifestUrl).on('change', function () {
-      settings.updateManifestUrl = this.value.trim();
-      saveSettings();
-    });
-    $('#wsp-check-update').on('click', () => checkForUpdate(true));
-    $('#wsp-update-apply').on('click', applyUpdate);
   }
 
   // ---------- 初始化 / 销毁 ----------
@@ -731,7 +665,6 @@
     const state = await loadWorldState();
     updateInjection(state);
     await refreshEditorFromState(state);
-    checkForUpdate(false);
     log(`世界模拟器 v${SCRIPT_VERSION} 已加载`);
   }
 

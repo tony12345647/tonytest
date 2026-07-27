@@ -1,5 +1,0 @@
-{
-  "version": "1.0.0",
-  "changelog": "首个 git 发布版本：悬浮面板、双API模式、楼层/分钟触发、重要角色与世界事件/后续发酵追踪、时间锚点同步、世界书地名参考、历史自动压缩、手动修正面板、角色升降级、版本检查。",
-  "script_url": "https://raw.githubusercontent.com/tony12345647/tonytest/main/世界模拟器.js"
-}
