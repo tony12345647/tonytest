@@ -20,7 +20,49 @@
     window.__world_sim_instance__.destroy();
   }
 
-  const SCRIPT_VERSION = '1.1.0';
+  if (typeof window.jQuery !== 'function') {
+    console.error('[世界模拟器] 找不到 jQuery，无法建立界面');
+    return;
+  }
+  const $ = window.jQuery;
+
+  // ---------- 酒馆助手接口解析 ----------
+  // 本文件是被 import() 动态加载的独立模块，酒馆助手注入到"脚本作用域"里的裸函数
+  // (getVariables / eventOn ...) 在这里不一定看得到，所以统一从 window 或
+  // window.TavernHelper 上解析，取不到时给出明确报错而不是整个模块炸掉。
+  const _TH = window.TavernHelper || {};
+  const _missing = [];
+  function _pick(name) {
+    if (typeof window[name] === 'function') return window[name].bind(window);
+    if (typeof _TH[name] === 'function') return _TH[name].bind(_TH);
+    _missing.push(name);
+    return () => { throw new Error('酒馆助手接口不可用：' + name); };
+  }
+  const API = {
+    getVariables: _pick('getVariables'),
+    insertOrAssignVariables: _pick('insertOrAssignVariables'),
+    generateRaw: _pick('generateRaw'),
+    getChatMessages: _pick('getChatMessages'),
+    eventOn: _pick('eventOn'),
+    eventRemoveListener: _pick('eventRemoveListener'),
+    triggerSlash: _pick('triggerSlash'),
+    getWorldbook: _pick('getWorldbook'),
+    getGlobalWorldbookNames: _pick('getGlobalWorldbookNames'),
+    getCharWorldbookNames: _pick('getCharWorldbookNames'),
+    getChatWorldbookName: _pick('getChatWorldbookName'),
+    tavern_events: window.tavern_events || _TH.tavern_events
+      || (window.SillyTavern && window.SillyTavern.getContext
+          ? window.SillyTavern.getContext().eventTypes : null)
+      || {},
+  };
+  if (!API.tavern_events.MESSAGE_RECEIVED) {
+    console.warn('[世界模拟器] 找不到 tavern_events.MESSAGE_RECEIVED，「每 N 楼」触发会失效，请改用「每 N 分钟」');
+  }
+  if (_missing.length) {
+    console.warn('[世界模拟器] 这些酒馆助手接口没找到，相关功能会失效：', _missing);
+  }
+
+  const SCRIPT_VERSION = "1.1.1";
   const INJECT_KEY = 'world_sim_current';
   const INJECT_TAG = 'World_Current';
   const MAX_EVENTS = 12;
@@ -87,7 +129,7 @@
   // ---------- 设置持久化(全局变量) ----------
   async function loadSettings() {
     try {
-      const vars = await getVariables({ type: 'global' });
+      const vars = await API.getVariables({ type: 'global' });
       if (vars && vars.world_sim_settings) {
         settings = { ...DEFAULT_SETTINGS, ...vars.world_sim_settings };
       }
@@ -98,7 +140,7 @@
 
   async function saveSettings() {
     try {
-      await insertOrAssignVariables({ world_sim_settings: settings }, { type: 'global' });
+      await API.insertOrAssignVariables({ world_sim_settings: settings }, { type: 'global' });
     } catch (e) {
       log('保存设置失败：' + e.message);
     }
@@ -107,7 +149,7 @@
   // ---------- 世界状态持久化(聊天变量，跟着当前RP走) ----------
   async function loadWorldState() {
     try {
-      const vars = await getVariables({ type: 'chat' });
+      const vars = await API.getVariables({ type: 'chat' });
       cachedState = { ...DEFAULT_STATE, ...(vars && vars.world_sim_state) };
     } catch (e) {
       log('读取世界状态失败：' + e.message);
@@ -119,7 +161,7 @@
   async function saveWorldState(state) {
     cachedState = state;
     try {
-      await insertOrAssignVariables({ world_sim_state: state }, { type: 'chat' });
+      await API.insertOrAssignVariables({ world_sim_state: state }, { type: 'chat' });
     } catch (e) {
       log('保存世界状态失败：' + e.message);
     }
@@ -241,7 +283,7 @@
   async function getStoryTime() {
     if (!settings.useWorldTime) return '';
     try {
-      const vars = await getVariables({ type: 'chat' });
+      const vars = await API.getVariables({ type: 'chat' });
       return (vars && vars.TimeLocation) || '';
     } catch (e) {
       return '';
@@ -255,11 +297,11 @@
     try {
       const ctx = SillyTavern.getContext();
       const bookNames = new Set();
-      try { (await getGlobalWorldbookNames() || []).forEach(n => bookNames.add(n)); } catch (e) { /* ignore */ }
+      try { (await API.getGlobalWorldbookNames() || []).forEach(n => bookNames.add(n)); } catch (e) { /* ignore */ }
       try {
         const charName = ctx.characters?.[ctx.characterId]?.name;
         if (charName) {
-          const cw = await getCharWorldbookNames(charName);
+          const cw = await API.getCharWorldbookNames(charName);
           if (cw) {
             if (cw.primary) bookNames.add(cw.primary);
             (cw.additional || []).forEach(n => bookNames.add(n));
@@ -269,14 +311,14 @@
       try {
         const chatName = ctx.chatId;
         if (chatName) {
-          const cn = await getChatWorldbookName(chatName);
+          const cn = await API.getChatWorldbookName(chatName);
           if (cn) bookNames.add(cn);
         }
       } catch (e) { /* ignore */ }
 
       for (const bn of bookNames) {
         try {
-          const entries = await getWorldbook(bn);
+          const entries = await API.getWorldbook(bn);
           (entries || []).forEach(e => {
             if (e.enabled !== false && e.name) names.add(e.name);
           });
@@ -290,7 +332,7 @@
 
   async function getRecentHistoryText(n) {
     try {
-      const msgs = await getChatMessages(`0-${n}`, { role: 'all', hide_state: 'unhidden' });
+      const msgs = await API.getChatMessages(`0-${n}`, { role: 'all', hide_state: 'unhidden' });
       return (msgs || [])
         .slice(-n)
         .map(m => `${m.name}: ${String(m.message || '').slice(0, 300)}`)
@@ -376,7 +418,7 @@
       if (!settings.customUrl || !settings.customModel) {
         throw new Error('自定义反代未填写完整(URL/Model)');
       }
-      return await generateRaw({
+      return await API.generateRaw({
         ordered_prompts: [
           { role: 'system', content: sys },
           { role: 'user', content: user },
@@ -389,7 +431,7 @@
         },
       });
     }
-    return await generateRaw({
+    return await API.generateRaw({
       ordered_prompts: [
         { role: 'system', content: sys },
         { role: 'user', content: user },
@@ -464,7 +506,7 @@
         };
         if (settings.autoNarration && c.visible && c.narration) {
           const safe = sanitizeForSlash(c.narration);
-          await triggerSlash(`/sys "${safe}"`);
+          await API.triggerSlash(`/sys "${safe}"`);
         }
         log(`· ${c.name}：${c.activity}${c.location ? '(' + c.location + ')' : ''}`);
       }
@@ -523,7 +565,7 @@
         runWorldTick();
       }
     };
-    eventOn(tavern_events.MESSAGE_RECEIVED, msgListenerHandle);
+    API.eventOn(API.tavern_events.MESSAGE_RECEIVED, msgListenerHandle);
   }
 
   function startMinuteTimer() {
@@ -1082,23 +1124,62 @@
     registerFloorTrigger();
     if (settings.running) startMinuteTimer();
     updateInjection(cachedState);
+    // 脚本被停用/页面卸载时自我清理，不留悬浮球在画面上
+    $(window).on('pagehide.worldsim', destroy);
     log(`世界模拟器 v${SCRIPT_VERSION} 已加载`);
   }
 
+  let destroyed = false;
   function destroy() {
+    if (destroyed) return;
+    destroyed = true;
+
     stopMinuteTimer();
     if (msgListenerHandle) {
-      eventRemoveListener(tavern_events.MESSAGE_RECEIVED, msgListenerHandle);
+      try { API.eventRemoveListener(API.tavern_events.MESSAGE_RECEIVED, msgListenerHandle); } catch (e) { /* noop */ }
       msgListenerHandle = null;
     }
+    // 清掉注入，避免脚本关了世界状态还留在RP提示词里
     try {
       const ctx = SillyTavern.getContext();
       ctx.setExtensionPrompt(INJECT_KEY, '', ctx.extension_prompt_types.IN_CHAT, settings.injectDepth, false, ctx.extension_prompt_roles.SYSTEM);
     } catch (e) { /* noop */ }
+
+    $(window).off('pagehide.worldsim');
     $(document).off('.wsp').off('.wsppanel');
     $('#wsp-ball, #wsp-panel, #wsp-style').remove();
+    if (window.__world_sim_instance__ && window.__world_sim_instance__.destroy === destroy) {
+      delete window.__world_sim_instance__;
+    }
+    console.log('[世界模拟器] 已卸载');
   }
 
   window.__world_sim_instance__ = { destroy };
-  init();
+
+  // 启动失败时在画面上直接说明，而不是静悄悄什么都没有
+  function showFatal(msg) {
+    $('#wsp-fatal').remove();
+    $(`<div id="wsp-fatal" style="position:fixed;top:20px;right:20px;z-index:10001;
+         max-width:360px;background:#4a1f1f;color:#ffd7d7;border:1px solid #a05050;
+         border-radius:8px;padding:12px;font-size:13px;font-family:system-ui,sans-serif;
+         box-shadow:0 4px 14px rgba(0,0,0,.5);">
+        <b>🌍 世界模拟器启动失败</b>
+        <div style="margin-top:6px;white-space:pre-wrap;">${$('<div>').text(msg).html()}</div>
+        <div style="margin-top:8px;font-size:11px;opacity:.8;">详细信息请看 F12 控制台</div>
+        <div style="text-align:right;margin-top:6px;">
+          <span style="cursor:pointer;text-decoration:underline;"
+                onclick="this.closest('#wsp-fatal').remove()">关闭</span>
+        </div>
+      </div>`).appendTo('body');
+  }
+
+  try {
+    init().catch(e => {
+      console.error('[世界模拟器] 初始化失败', e);
+      showFatal(e && e.message ? e.message : String(e));
+    });
+  } catch (e) {
+    console.error('[世界模拟器] 初始化失败', e);
+    showFatal(e && e.message ? e.message : String(e));
+  }
 })();
